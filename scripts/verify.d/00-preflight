@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+missing=()
+for tool in ruff mypy pytest; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    missing+=("${tool}")
+  fi
+done
+
+if [[ ${#missing[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+joined="$(IFS=', '; echo "${missing[*]}")"
+cat >&2 <<EOF
+missing tools: ${joined}
+run:
+  python -m venv .venv
+  source .venv/Scripts/activate   # Windows
+  source .venv/bin/activate       # Linux/macOS
+  pip install -e ".[dev]"
+EOF
+exit 1

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "${ROOT}"
+
+git config core.hooksPath .githooks
+
+actual="$(git config --get core.hooksPath)"
+if [[ "${actual}" != ".githooks" ]]; then
+  echo "error: core.hooksPath is '${actual}', expected '.githooks'" >&2
+  exit 1
+fi
+
+echo "core.hooksPath=${actual}"

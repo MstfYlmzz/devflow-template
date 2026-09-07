@@ -9,6 +9,14 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+if [[ -d "${ROOT}/.venv/Scripts" ]]; then
+  PATH="${ROOT}/.venv/Scripts:${PATH}"
+fi
+if [[ -d "${ROOT}/.venv/bin" ]]; then
+  PATH="${ROOT}/.venv/bin:${PATH}"
+fi
+export PATH
+
 VERIFY_D="${ROOT}/scripts/verify.d"
 
 if [[ ! -d "${VERIFY_D}" ]]; then

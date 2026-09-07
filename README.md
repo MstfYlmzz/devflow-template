@@ -10,3 +10,5 @@ Install the package with dev dependencies, then run the verification pipeline:
 pip install -e ".[dev]"
 ./scripts/verify
 ```
+
+After cloning, run `./scripts/setup-hooks`.
