@@ -7,6 +7,19 @@ import sys
 from pathlib import Path
 
 from devflow.init import expected_relative_paths, init
+from devflow.policy import (
+    ArchitectureImpact,
+    Complexity,
+    EpicProposal,
+    Risk,
+    RoutingDecision,
+    apply_floor,
+    check_merge_gate,
+    decide,
+    load_policy,
+    needed_triage_fields,
+    validate_policy,
+)
 
 _TODO_MARK = "<!-- TODO:"
 _EXPECTED_DIRS: tuple[str, ...] = (
@@ -153,12 +166,171 @@ def doctor(root: Path) -> int:
     else:
         emit("ok", "no TODO comments")
 
+    policy_path = root / ".ai" / "policy.yml"
+    if policy_path.is_file():
+        try:
+            for message in validate_policy(load_policy(policy_path)):
+                emit("error", message)
+        except ValueError as exc:
+            emit("error", str(exc))
+
     print(f"{errors} error(s), {warnings} warning(s)")
     return 1 if errors else 0
 
 
 def _cmd_doctor() -> int:
     return doctor(Path.cwd())
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _policy_path() -> Path:
+    cwd_policy = Path.cwd() / ".ai" / "policy.yml"
+    if cwd_policy.is_file():
+        return cwd_policy
+    bundled = (
+        Path(__file__).resolve().parent.parent
+        / "templates"
+        / "project"
+        / ".ai"
+        / "policy.yml"
+    )
+    if bundled.is_file():
+        return bundled
+    raise FileNotFoundError(".ai/policy.yml not found")
+
+
+def _cmd_classify(
+    *,
+    paths_arg: str,
+    labels_arg: str,
+    risk_arg: str | None,
+    epic_risk_arg: str | None,
+    epic_complexity_arg: str | None,
+) -> int:
+    try:
+        policy = load_policy(_policy_path())
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    user_hint: Risk | None = None
+    if risk_arg:
+        try:
+            user_hint = Risk(risk_arg.strip().upper())
+        except ValueError:
+            print(f"invalid risk: {risk_arg}", file=sys.stderr)
+            return 2
+
+    epic: EpicProposal | None = None
+    if epic_risk_arg or epic_complexity_arg:
+        try:
+            epic_risk = Risk(epic_risk_arg.strip().upper()) if epic_risk_arg else None
+            epic_complexity = (
+                Complexity(epic_complexity_arg.strip().upper())
+                if epic_complexity_arg
+                else None
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        epic = EpicProposal(risk=epic_risk, complexity=epic_complexity, reason=None)
+
+    paths = _split_csv(paths_arg)
+    labels = _split_csv(labels_arg)
+    floor = apply_floor(paths, labels, policy)
+    needed = needed_triage_fields(floor, epic)
+    decision = decide(
+        floor=floor,
+        signals=None,
+        complexity=None,
+        architecture_impact=ArchitectureImpact.NONE,
+        uncertain=False,
+        user_risk_hint=user_hint,
+        paths=paths,
+        policy=policy,
+        epic=epic,
+    )
+
+    risk_reason = ""
+    floor_glob = (
+        floor.matched_rules[0].split(" (path:", 1)[0] if floor.matched_rules else ""
+    )
+    if epic is not None and epic.risk is not None:
+        if floor.risk_floor is not None and floor.risk_floor is not epic.risk:
+            risk_reason = f"  (epic proposal, raised by floor: {floor_glob})"
+        else:
+            risk_reason = "  (epic proposal)"
+    elif floor.risk_floor is not None and floor_glob:
+        risk_reason = f"  (floor: {floor_glob})"
+    elif user_hint is not None:
+        risk_reason = "  (user hint)"
+
+    complexity_needed = "complexity" in needed
+    if complexity_needed:
+        complexity_text = "? (triage needed)"
+        implementer_text = "? (depends on complexity)"
+    elif epic is not None and epic.complexity is not None:
+        complexity_text = f"{decision.complexity.value}  (epic proposal)"
+        implementer_text = decision.implementer
+    else:
+        complexity_text = decision.complexity.value
+        implementer_text = decision.implementer
+
+    review_text = "required" if decision.review_required else "not required"
+    bypass_text = f"allowed (friction: {decision.bypass_friction})"
+
+    print(f"{'risk:':<13}{decision.risk.value}{risk_reason}")
+    print(f"{'complexity:':<13}{complexity_text}")
+    print(f"{'implementer:':<13}{implementer_text}")
+    print(f"{'review:':<13}{review_text}")
+    print(f"{'bypass:':<13}{bypass_text}")
+    print()
+    if needed:
+        print(f"triage needed for: {', '.join(needed)}")
+    else:
+        print("triage: not needed (epic decision present)")
+    return 0
+
+
+def _stub_decision(risk: Risk) -> RoutingDecision:
+    return RoutingDecision(
+        risk=risk,
+        complexity=Complexity.MEDIUM,
+        architecture_impact=ArchitectureImpact.NONE,
+        implementer="cursor",
+        plan_required=False,
+        plan_approval_required=False,
+        review_required=False,
+        evidence_required=False,
+        bypass_allowed=True,
+        bypass_friction="none" if risk is Risk.LOW else "reason",
+        reasons=[],
+    )
+
+
+def _cmd_check_merge(*, risk_arg: str, paths_arg: str) -> int:
+    try:
+        policy = load_policy(_policy_path())
+        previous = Risk(risk_arg.strip().upper())
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    paths = _split_csv(paths_arg)
+    result = check_merge_gate(_stub_decision(previous), paths, policy)
+    glob = ""
+    if result.matched_rules:
+        glob = f"  ({result.matched_rules[0].split(' (path:', 1)[0]})"
+    print(f"{'previous:':<13}{result.previous_risk.value}")
+    print(f"{'actual:':<13}{result.actual_risk.value}{glob}")
+    if result.passed:
+        print(f"{'result:':<13}OK")
+        return 0
+    print(f"{'result:':<13}{result.reason}")
+    return 1
 
 
 def main() -> None:
@@ -168,9 +340,32 @@ def main() -> None:
     init_parser = sub.add_parser("init")
     init_parser.add_argument("--force", action="store_true")
 
+    classify_parser = sub.add_parser("classify")
+    classify_parser.add_argument("--paths", required=True)
+    classify_parser.add_argument("--labels", default="")
+    classify_parser.add_argument("--risk", default=None)
+    classify_parser.add_argument("--epic-risk", default=None)
+    classify_parser.add_argument("--epic-complexity", default=None)
+
+    merge_parser = sub.add_parser("check-merge")
+    merge_parser.add_argument("--risk", required=True)
+    merge_parser.add_argument("--paths", required=True)
+
     sub.add_parser("doctor")
 
     args = parser.parse_args()
     if args.command == "init":
         raise SystemExit(_cmd_init(force=args.force))
+    if args.command == "classify":
+        raise SystemExit(
+            _cmd_classify(
+                paths_arg=args.paths,
+                labels_arg=args.labels,
+                risk_arg=args.risk,
+                epic_risk_arg=args.epic_risk,
+                epic_complexity_arg=args.epic_complexity,
+            )
+        )
+    if args.command == "check-merge":
+        raise SystemExit(_cmd_check_merge(risk_arg=args.risk, paths_arg=args.paths))
     raise SystemExit(_cmd_doctor())

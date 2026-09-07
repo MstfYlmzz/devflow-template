@@ -1,3 +1,5 @@
+reviewed_for_this_project: false
+
 floor:
   # Narrow this high-risk list per project. Narrowing is a conscious decision.
   high:
@@ -90,27 +92,6 @@ floor:
     - path: "fixtures/**"
       label: fixtures
       risk: LOW
-
-# This list stops --skip-review and --review advisory from becoming the default.
-no_bypass:
-  - "**/*auth*"
-  - "**/*login*"
-  - "**/*session*"
-  - "**/*oauth*"
-  - "**/*jwt*"
-  - "**/*payment*"
-  - "**/*billing*"
-  - "**/*checkout*"
-  - "**/*invoice*"
-  - "**/*subscri*"
-  - "**/*migrat*"
-  - "**/*schema*"
-  - "**/*crypt*"
-  - "**/*encrypt*"
-  - "**/*secret*"
-  - "**/*credential*"
-  - "**/*token*"
-  - "**/*password*"
 
 # Kept short: globs in floor already cover auth, schema, and public API.
 signal_floor:
