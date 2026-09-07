@@ -16,6 +16,7 @@ from devflow.agents import (
     run,
 )
 from devflow.init import expected_relative_paths, init
+from devflow.paths import task_file
 from devflow.policy import (
     ArchitectureImpact,
     Complexity,
@@ -29,6 +30,7 @@ from devflow.policy import (
     needed_triage_fields,
     validate_policy,
 )
+from devflow.taskfile import body_sections, decision_inputs, read, read_doc_impact
 
 _TODO_MARK = "<!-- TODO:"
 _EXPECTED_DIRS: tuple[str, ...] = (
@@ -407,6 +409,78 @@ def _cmd_agent_smoke(*, agent: str) -> int:
         return 1
 
 
+def _cmd_task_show(*, task_id: int) -> int:
+    path = task_file(task_id)
+    if not path.is_file():
+        print(f"task file not found: {path}", file=sys.stderr)
+        return 1
+    try:
+        policy = load_policy(_policy_path())
+        tf = read(path)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    epic, floor, signals, complexity, architecture_impact, uncertain = decision_inputs(
+        tf
+    )
+    needed = needed_triage_fields(floor, epic)
+    decision = decide(
+        floor=floor,
+        signals=signals,
+        complexity=complexity,
+        architecture_impact=architecture_impact,
+        uncertain=uncertain,
+        user_risk_hint=None,
+        paths=list(tf.frontmatter.modules),
+        policy=policy,
+        epic=epic,
+    )
+    fm = tf.frontmatter
+    epic_name = fm.epic if fm.epic else "(none)"
+    if epic is None:
+        epic_proposed = "(none)"
+    else:
+        risk_text = epic.risk.value if epic.risk is not None else "(none)"
+        complexity_text = (
+            epic.complexity.value if epic.complexity is not None else "(none)"
+        )
+        epic_proposed = f"{risk_text} / {complexity_text}"
+    floor_text = ", ".join(floor.matched_rules) if floor.matched_rules else "(none)"
+    triage_text = "not needed" if not needed else f"needed ({', '.join(needed)})"
+    review_text = "required" if decision.review_required else "not required"
+    sections = body_sections(tf)
+    sections_text = ", ".join(sections) if sections else "(none)"
+    impact = read_doc_impact(tf)
+    if impact is None:
+        impact_text = "(none)"
+    elif impact.status == "updated" and impact.files:
+        impact_text = f"{impact.status} ({', '.join(impact.files)})"
+    elif impact.status == "adr_required" and impact.adr:
+        impact_text = f"{impact.status} ({impact.adr})"
+    else:
+        impact_text = impact.status
+
+    print(f"task {fm.id} — {fm.title}")
+    print(f"epic:  {epic_name}")
+    print(f"state: {fm.state}")
+    print()
+    print("inputs:")
+    print(f"  {'epic proposed:':<16}{epic_proposed}")
+    print(f"  {'floor matched:':<16}{floor_text}")
+    print(f"  {'triage:':<16}{triage_text}")
+    print()
+    print("computed:")
+    print(f"  {'risk:':<13}{decision.risk.value}")
+    print(f"  {'complexity:':<13}{decision.complexity.value}")
+    print(f"  {'implementer:':<13}{decision.implementer}")
+    print(f"  {'review:':<13}{review_text}")
+    print()
+    print(f"sections: {sections_text}")
+    print(f"doc impact: {impact_text}")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -431,6 +505,11 @@ def main() -> None:
     smoke_parser = sub.add_parser("agent-smoke")
     smoke_parser.add_argument("--agent", required=True, choices=list(COMMANDS))
 
+    task_parser = sub.add_parser("task")
+    task_sub = task_parser.add_subparsers(dest="task_command", required=True)
+    show_parser = task_sub.add_parser("show")
+    show_parser.add_argument("task_id", type=int, metavar="id")
+
     args = parser.parse_args()
     if args.command == "init":
         raise SystemExit(_cmd_init(force=args.force))
@@ -450,4 +529,6 @@ def main() -> None:
         raise SystemExit(_cmd_agent_check())
     if args.command == "agent-smoke":
         raise SystemExit(_cmd_agent_smoke(agent=args.agent))
+    if args.command == "task":
+        raise SystemExit(_cmd_task_show(task_id=args.task_id))
     raise SystemExit(_cmd_doctor())
