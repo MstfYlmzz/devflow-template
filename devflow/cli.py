@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+from devflow.agents import COMMANDS, _resolve_command
 from devflow.init import expected_relative_paths, init
 from devflow.policy import (
     ArchitectureImpact,
@@ -333,6 +335,26 @@ def _cmd_check_merge(*, risk_arg: str, paths_arg: str) -> int:
     return 1
 
 
+def _cmd_agent_check() -> int:
+    missing = False
+    for name, env_name in COMMANDS.items():
+        argv = _resolve_command(name)
+        label = f"{name}:"
+        if argv is None:
+            print(f"{label:<9}not configured — set {env_name}")
+            missing = True
+            continue
+        binary = argv[0]
+        found = shutil.which(binary) is not None or Path(binary).is_file()
+        shown = Path(binary).name
+        if found:
+            print(f"{label:<9}configured ({shown})")
+        else:
+            print(f"{label:<9}configured ({shown}), not found in PATH")
+            missing = True
+    return 1 if missing else 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -352,6 +374,7 @@ def main() -> None:
     merge_parser.add_argument("--paths", required=True)
 
     sub.add_parser("doctor")
+    sub.add_parser("agent-check")
 
     args = parser.parse_args()
     if args.command == "init":
@@ -368,4 +391,6 @@ def main() -> None:
         )
     if args.command == "check-merge":
         raise SystemExit(_cmd_check_merge(risk_arg=args.risk, paths_arg=args.paths))
+    if args.command == "agent-check":
+        raise SystemExit(_cmd_agent_check())
     raise SystemExit(_cmd_doctor())
