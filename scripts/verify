@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 0 ]]; then
+  echo "usage: ./scripts/verify" >&2
+  exit 2
+fi
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+VERIFY_D="${ROOT}/scripts/verify.d"
+
+if [[ ! -d "${VERIFY_D}" ]]; then
+  echo "error: scripts/verify.d/ not found" >&2
+  exit 1
+fi
+
+shopt -s nullglob
+stages=()
+for f in "${VERIFY_D}"/*; do
+  if [[ -f "${f}" && -x "${f}" ]]; then
+    stages+=("${f}")
+  fi
+done
+shopt -u nullglob
+
+if [[ ${#stages[@]} -eq 0 ]]; then
+  echo "error: no executable stages in scripts/verify.d/" >&2
+  exit 1
+fi
+
+mapfile -t stages < <(printf '%s\n' "${stages[@]}" | sort)
+
+total_start=$SECONDS
+
+for stage in "${stages[@]}"; do
+  name="$(basename "${stage}")"
+  echo "==> ${name}"
+  stage_start=$SECONDS
+  "${stage}"
+  echo "    $((SECONDS - stage_start))s"
+done
+
+echo "total: $((SECONDS - total_start))s"
