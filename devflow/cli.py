@@ -30,7 +30,22 @@ from devflow.policy import (
     needed_triage_fields,
     validate_policy,
 )
-from devflow.taskfile import body_sections, decision_inputs, read, read_doc_impact
+from devflow.states import (
+    InvalidTransition,
+    State,
+    Trigger,
+    review_cycle_count,
+    transition,
+)
+from devflow.taskfile import (
+    TaskFile,
+    append_section,
+    body_sections,
+    decision_inputs,
+    read,
+    read_doc_impact,
+    update_frontmatter,
+)
 
 _TODO_MARK = "<!-- TODO:"
 _EXPECTED_DIRS: tuple[str, ...] = (
@@ -481,6 +496,89 @@ def _cmd_task_show(*, task_id: int) -> int:
     return 0
 
 
+def _routing_decision(tf: TaskFile) -> RoutingDecision:
+    policy = load_policy(_policy_path())
+    epic, floor, signals, complexity, architecture_impact, uncertain = decision_inputs(
+        tf
+    )
+    return decide(
+        floor=floor,
+        signals=signals,
+        complexity=complexity,
+        architecture_impact=architecture_impact,
+        uncertain=uncertain,
+        user_risk_hint=None,
+        paths=list(tf.frontmatter.modules),
+        policy=policy,
+        epic=epic,
+    )
+
+
+def _parse_blocked_from(value: str | None) -> State | None:
+    if value is None:
+        return None
+    try:
+        return State(value)
+    except ValueError:
+        return None
+
+
+def _cmd_task_transition(
+    *,
+    task_id: int,
+    trigger_arg: str,
+    dry_run: bool,
+) -> int:
+    path = task_file(task_id)
+    if not path.is_file():
+        print(f"task file not found: {path}", file=sys.stderr)
+        return 1
+    trigger = Trigger(trigger_arg)
+    try:
+        tf = read(path)
+        current = State(tf.frontmatter.state)
+        decision = _routing_decision(tf)
+        result = transition(
+            current,
+            trigger,
+            decision,
+            has_epic_decision=(
+                tf.frontmatter.risk_proposed is not None
+                and tf.frontmatter.complexity_proposed is not None
+            ),
+            review_cycles=review_cycle_count(tf),
+            blocked_from=_parse_blocked_from(tf.frontmatter.blocked_from),
+        )
+    except InvalidTransition as exc:
+        print(f"{task_id}: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if not dry_run:
+        updates: dict[str, object] = {"state": result.to_state.value}
+        if result.to_state is State.BLOCKED:
+            updates["blocked_from"] = result.from_state.value
+        elif result.from_state is State.BLOCKED:
+            updates["blocked_from"] = None
+        update_frontmatter(path, **updates)
+        append_section(
+            path,
+            "Transition",
+            (
+                f"{result.from_state.value} → {result.to_state.value}"
+                f" ({result.trigger.value})"
+            ),
+        )
+
+    print(
+        f"{task_id}: {result.from_state.value} → {result.to_state.value}"
+        f"  ({result.trigger.value})"
+    )
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -509,6 +607,14 @@ def main() -> None:
     task_sub = task_parser.add_subparsers(dest="task_command", required=True)
     show_parser = task_sub.add_parser("show")
     show_parser.add_argument("task_id", type=int, metavar="id")
+    trans_parser = task_sub.add_parser("transition")
+    trans_parser.add_argument("task_id", type=int, metavar="id")
+    trans_parser.add_argument(
+        "--trigger",
+        required=True,
+        choices=[item.value for item in Trigger],
+    )
+    trans_parser.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args()
     if args.command == "init":
@@ -530,5 +636,13 @@ def main() -> None:
     if args.command == "agent-smoke":
         raise SystemExit(_cmd_agent_smoke(agent=args.agent))
     if args.command == "task":
-        raise SystemExit(_cmd_task_show(task_id=args.task_id))
+        if args.task_command == "show":
+            raise SystemExit(_cmd_task_show(task_id=args.task_id))
+        raise SystemExit(
+            _cmd_task_transition(
+                task_id=args.task_id,
+                trigger_arg=args.trigger,
+                dry_run=args.dry_run,
+            )
+        )
     raise SystemExit(_cmd_doctor())
