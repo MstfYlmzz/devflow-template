@@ -66,6 +66,7 @@ class TaskFrontmatter:
     uncertain: bool
     floor_risk_actual: Risk | None
     floor_matched_actual: list[str]
+    blocked_from: str | None
 
 
 @dataclass
@@ -168,6 +169,7 @@ def create(
     uncertain: bool = False,
     floor_risk_actual: Risk | None = None,
     floor_matched_actual: list[str] | None = None,
+    blocked_from: str | None = None,
     body: str = "",
 ) -> TaskFile:
     if path.exists():
@@ -190,6 +192,7 @@ def create(
         uncertain=uncertain,
         floor_risk_actual=floor_risk_actual,
         floor_matched_actual=_redact_str_list(floor_matched_actual or []),
+        blocked_from=redact(blocked_from) if blocked_from is not None else None,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     _write(path, fm, redact(body) if body else "")
@@ -301,6 +304,7 @@ def _parse_frontmatter(data: dict[str, object]) -> TaskFrontmatter:
         floor_matched_actual=_parse_str_list(
             data.get("floor_matched_actual"), "floor_matched_actual"
         ),
+        blocked_from=_opt_str(data.get("blocked_from")),
     )
 
 
