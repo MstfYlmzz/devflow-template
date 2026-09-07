@@ -1,0 +1,138 @@
+floor:
+  # Narrow this high-risk list per project. Narrowing is a conscious decision.
+  high:
+    - path: "**/*auth*"
+      label: auth
+      risk: HIGH
+    - path: "**/*login*"
+      label: auth
+      risk: HIGH
+    - path: "**/*session*"
+      label: auth
+      risk: HIGH
+    - path: "**/*oauth*"
+      label: auth
+      risk: HIGH
+    - path: "**/*jwt*"
+      label: auth
+      risk: HIGH
+    - path: "**/*payment*"
+      label: payment
+      risk: HIGH
+    - path: "**/*billing*"
+      label: payment
+      risk: HIGH
+    - path: "**/*checkout*"
+      label: payment
+      risk: HIGH
+    - path: "**/*invoice*"
+      label: payment
+      risk: HIGH
+    - path: "**/*subscri*"
+      label: payment
+      risk: HIGH
+    - path: "**/*migrat*"
+      label: migration
+      risk: HIGH
+    - path: "**/*schema*"
+      label: migration
+      risk: HIGH
+    - path: "**/*crypt*"
+      label: crypto
+      risk: HIGH
+    - path: "**/*encrypt*"
+      label: crypto
+      risk: HIGH
+    - path: "**/*secret*"
+      label: crypto
+      risk: HIGH
+    - path: "**/*credential*"
+      label: crypto
+      risk: HIGH
+    - path: "**/*token*"
+      label: crypto
+      risk: HIGH
+    - path: "**/*password*"
+      label: crypto
+      risk: HIGH
+    - path: "**/api/public/**"
+      label: public-api
+      risk: HIGH
+    - path: "**/api/v*/**"
+      label: public-api
+      risk: HIGH
+    - path: "**/routes/public/**"
+      label: public-api
+      risk: HIGH
+  # Narrow this low-risk list per project. Narrowing is a conscious decision.
+  low:
+    - path: "**/*.css"
+      label: style
+      risk: LOW
+    - path: "**/*.scss"
+      label: style
+      risk: LOW
+    - path: "**/*.md"
+      label: docs
+      risk: LOW
+    - path: "docs/**"
+      label: docs
+      risk: LOW
+    - path: "README*"
+      label: docs
+      risk: LOW
+    - path: "LICENSE*"
+      label: docs
+      risk: LOW
+    - path: "**/*.snap"
+      label: fixtures
+      risk: LOW
+    - path: "fixtures/**"
+      label: fixtures
+      risk: LOW
+
+# This list stops --skip-review and --review advisory from becoming the default.
+no_bypass:
+  - "**/*auth*"
+  - "**/*login*"
+  - "**/*session*"
+  - "**/*oauth*"
+  - "**/*jwt*"
+  - "**/*payment*"
+  - "**/*billing*"
+  - "**/*checkout*"
+  - "**/*invoice*"
+  - "**/*subscri*"
+  - "**/*migrat*"
+  - "**/*schema*"
+  - "**/*crypt*"
+  - "**/*encrypt*"
+  - "**/*secret*"
+  - "**/*credential*"
+  - "**/*token*"
+  - "**/*password*"
+
+# Kept short: globs in floor already cover auth, schema, and public API.
+signal_floor:
+  transaction_change: HIGH
+  concurrency_sensitive: HIGH
+  architecture_boundary_change: HIGH
+  unfamiliar_area: MEDIUM
+
+routing:
+  complexity:
+    LOW: cursor
+    MEDIUM: cursor
+    HIGH: codex
+  risk:
+    LOW:
+      plan: none
+      review: none
+    MEDIUM:
+      plan: short
+      review: required
+    HIGH:
+      plan: formal_with_human_approval
+      review: required_with_evidence
+  review_max_cycles: 2
+  agent_timeout_minutes: 20
