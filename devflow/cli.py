@@ -5,9 +5,16 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-from devflow.agents import COMMANDS, _resolve_command
+from devflow.agents import (
+    COMMANDS,
+    AgentMode,
+    _defined_modes,
+    _resolve_command,
+    run,
+)
 from devflow.init import expected_relative_paths, init
 from devflow.policy import (
     ArchitectureImpact,
@@ -347,12 +354,57 @@ def _cmd_agent_check() -> int:
         binary = argv[0]
         found = shutil.which(binary) is not None or Path(binary).is_file()
         shown = Path(binary).name
-        if found:
-            print(f"{label:<9}configured ({shown})")
+        modes = _defined_modes(name)
+        if modes:
+            modes_text = ", ".join(mode.value for mode in modes)
         else:
-            print(f"{label:<9}configured ({shown}), not found in PATH")
+            modes_text = "none (flags not defined)"
+        if found:
+            print(f"{label:<9}configured ({shown}) — modes: {modes_text}")
+        else:
+            print(
+                f"{label:<9}configured ({shown}), not found in PATH"
+                f" — modes: {modes_text}"
+            )
             missing = True
     return 1 if missing else 0
+
+
+_SMOKE_SOURCE = "def add(a, b):\n    return a - b\n"
+_SMOKE_PROMPT = "fix the bug"
+
+
+def _cmd_agent_smoke(*, agent: str) -> int:
+    with tempfile.TemporaryDirectory(prefix="devflow-smoke-") as tmp:
+        worktree = Path(tmp)
+        target = worktree / "add.py"
+        target.write_text(_SMOKE_SOURCE, encoding="utf-8")
+        prompt_file = worktree / "prompt.txt"
+        prompt_file.write_text(_SMOKE_PROMPT, encoding="utf-8")
+
+        run(agent, prompt_file, worktree, AgentMode.READ_ONLY)
+        read_only_ok = (
+            target.is_file() and target.read_text(encoding="utf-8") == _SMOKE_SOURCE
+        )
+        if read_only_ok:
+            print("read_only: file unchanged — OK")
+        else:
+            print("read_only: file modified — FAIL")
+
+        target.write_text(_SMOKE_SOURCE, encoding="utf-8")
+        run(agent, prompt_file, worktree, AgentMode.EDIT)
+        edit_ok = (
+            target.is_file() and target.read_text(encoding="utf-8") != _SMOKE_SOURCE
+        )
+        if edit_ok:
+            print("edit:      file modified — OK")
+        else:
+            print("edit:      file unchanged — FAIL")
+
+        if read_only_ok and edit_ok:
+            print(f"{agent}: permission model verified")
+            return 0
+        return 1
 
 
 def main() -> None:
@@ -376,6 +428,9 @@ def main() -> None:
     sub.add_parser("doctor")
     sub.add_parser("agent-check")
 
+    smoke_parser = sub.add_parser("agent-smoke")
+    smoke_parser.add_argument("--agent", required=True, choices=list(COMMANDS))
+
     args = parser.parse_args()
     if args.command == "init":
         raise SystemExit(_cmd_init(force=args.force))
@@ -393,4 +448,6 @@ def main() -> None:
         raise SystemExit(_cmd_check_merge(risk_arg=args.risk, paths_arg=args.paths))
     if args.command == "agent-check":
         raise SystemExit(_cmd_agent_check())
+    if args.command == "agent-smoke":
+        raise SystemExit(_cmd_agent_smoke(agent=args.agent))
     raise SystemExit(_cmd_doctor())
