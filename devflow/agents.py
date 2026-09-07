@@ -26,11 +26,20 @@ RETRY_PATTERNS: tuple[str, ...] = (
 
 _RETRY_DELAYS: tuple[int, ...] = (30, 120)
 
+_CLAUDE_READ_TOOLS = "Read,Grep,Glob"
+_CLAUDE_EDIT_TOOLS = "Read,Grep,Glob,Edit,Write,Bash"
+
 
 class AgentStatus(enum.Enum):
     OK = "ok"
     RETRY = "retry"
     BLOCKED = "blocked"
+
+
+class AgentMode(enum.Enum):
+    READ_ONLY = "read_only"
+    EDIT = "edit"
+    REVIEW = "review"
 
 
 @dataclass
@@ -53,6 +62,47 @@ def _resolve_command(agent: str) -> list[str] | None:
     return _split_command(raw)
 
 
+def _claude_mode_flags(mode: AgentMode, prompt: str) -> list[str]:
+    if mode is AgentMode.READ_ONLY:
+        return ["-p", prompt, "--allowedTools", _CLAUDE_READ_TOOLS]
+    # REVIEW uses the same flags as EDIT. Isolation is a separate worktree,
+    # not a tighter Claude permission set.
+    return [
+        "-p",
+        prompt,
+        "--allowedTools",
+        _CLAUDE_EDIT_TOOLS,
+        "--permission-mode",
+        "acceptEdits",
+    ]
+
+
+def _mode_flags(agent: str, mode: AgentMode, prompt: str) -> list[str]:
+    if agent == "claude":
+        return _claude_mode_flags(mode, prompt)
+    # TODO: cursor and codex mode flags are not known yet.
+    return []
+
+
+def _defined_modes(agent: str) -> tuple[AgentMode, ...]:
+    if agent not in COMMANDS:
+        raise ValueError(f"unknown agent: {agent}")
+    if agent == "claude":
+        return (AgentMode.READ_ONLY, AgentMode.EDIT, AgentMode.REVIEW)
+    return ()
+
+
+def _build_command(
+    agent: str,
+    mode: AgentMode,
+    prompt: str,
+) -> list[str] | None:
+    argv = _resolve_command(agent)
+    if argv is None:
+        return None
+    return [*argv, *_mode_flags(agent, mode, prompt)]
+
+
 def classify_failure(exit_code: int, stderr: str) -> tuple[AgentStatus, str]:
     _ = exit_code
     lowered = stderr.casefold()
@@ -66,6 +116,7 @@ def run(
     agent: str,
     prompt_file: Path,
     worktree: Path,
+    mode: AgentMode,
     timeout_minutes: float = 20,
 ) -> AgentResult:
     if agent not in COMMANDS:
@@ -77,7 +128,8 @@ def run(
 
     started = time.monotonic()
     env_name = COMMANDS[agent]
-    argv = _resolve_command(agent)
+    prompt = prompt_file.read_text(encoding="utf-8")
+    argv = _build_command(agent, mode, prompt)
     if argv is None:
         return AgentResult(
             status=AgentStatus.BLOCKED,
@@ -132,6 +184,7 @@ def run_with_retry(
     agent: str,
     prompt_file: Path,
     worktree: Path,
+    mode: AgentMode,
     max_attempts: int = 3,
     timeout_minutes: float = 20,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -142,6 +195,7 @@ def run_with_retry(
             agent,
             prompt_file,
             worktree,
+            mode,
             timeout_minutes=timeout_minutes,
         )
         if last.status is not AgentStatus.RETRY:

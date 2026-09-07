@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from devflow.agents import AgentStatus, run, run_with_retry
+from devflow.agents import (
+    AgentMode,
+    AgentStatus,
+    _build_command,
+    run,
+    run_with_retry,
+)
 
 
 def _cmd_string(args: list[str]) -> str:
@@ -40,13 +46,24 @@ def test_agent_status_has_exactly_three_values() -> None:
     assert len(AgentStatus) == 3
 
 
+def test_agent_mode_has_exactly_three_values() -> None:
+    assert {member.name for member in AgentMode} == {"READ_ONLY", "EDIT", "REVIEW"}
+    assert len(AgentMode) == 3
+
+
+def test_run_requires_mode(tmp_path: Path) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    with pytest.raises(TypeError):
+        run("cursor", prompt, worktree)  # type: ignore[call-arg]
+
+
 def test_run_exit_zero_is_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     prompt, worktree = _prompt_and_tree(tmp_path)
     _set_cursor(
         monkeypatch,
         _script(tmp_path, "ok.py", "print('hello from agent')\n"),
     )
-    result = run("cursor", prompt, worktree)
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
     assert result.status is AgentStatus.OK
     assert "hello from agent" in result.output
     assert result.duration_seconds > 0
@@ -64,7 +81,7 @@ def test_run_rate_limit_is_retry(
             "import sys\nsys.stderr.write('rate limit exceeded')\nsys.exit(1)\n",
         ),
     )
-    result = run("cursor", prompt, worktree)
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
     assert result.status is AgentStatus.RETRY
 
 
@@ -80,7 +97,7 @@ def test_run_invalid_api_key_is_blocked(
             "import sys\nsys.stderr.write('invalid api key')\nsys.exit(1)\n",
         ),
     )
-    result = run("cursor", prompt, worktree)
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
     assert result.status is AgentStatus.BLOCKED
 
 
@@ -96,7 +113,7 @@ def test_run_unknown_stderr_is_blocked(
             "import sys\nsys.stderr.write('something went boom')\nsys.exit(1)\n",
         ),
     )
-    result = run("cursor", prompt, worktree)
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
     assert result.status is AgentStatus.BLOCKED
 
 
@@ -119,7 +136,13 @@ def test_run_timeout_kills_process(
         monkeypatch,
         [sys.executable, str(script), str(pid_file), str(done_file)],
     )
-    result = run("cursor", prompt, worktree, timeout_minutes=0.05)
+    result = run(
+        "cursor",
+        prompt,
+        worktree,
+        AgentMode.READ_ONLY,
+        timeout_minutes=0.05,
+    )
     assert result.status is AgentStatus.BLOCKED
     assert result.duration_seconds < 10
     assert not done_file.exists()
@@ -133,20 +156,20 @@ def test_run_missing_prompt_raises(tmp_path: Path) -> None:
     worktree = tmp_path / "work"
     worktree.mkdir()
     with pytest.raises(ValueError):
-        run("cursor", tmp_path / "missing.md", worktree)
+        run("cursor", tmp_path / "missing.md", worktree, AgentMode.READ_ONLY)
 
 
 def test_run_missing_worktree_raises(tmp_path: Path) -> None:
     prompt = tmp_path / "prompt.md"
     prompt.write_text("x\n", encoding="utf-8")
     with pytest.raises(ValueError):
-        run("cursor", prompt, tmp_path / "no-such-dir")
+        run("cursor", prompt, tmp_path / "no-such-dir", AgentMode.READ_ONLY)
 
 
 def test_run_unknown_agent_raises(tmp_path: Path) -> None:
     prompt, worktree = _prompt_and_tree(tmp_path)
     with pytest.raises(ValueError):
-        run("nope", prompt, worktree)
+        run("nope", prompt, worktree, AgentMode.READ_ONLY)
 
 
 def test_run_unconfigured_command_is_blocked(
@@ -154,7 +177,7 @@ def test_run_unconfigured_command_is_blocked(
 ) -> None:
     prompt, worktree = _prompt_and_tree(tmp_path)
     monkeypatch.delenv("DEVFLOW_CURSOR_CMD", raising=False)
-    result = run("cursor", prompt, worktree)
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
     assert result.status is AgentStatus.BLOCKED
     assert result.detail is not None
     assert "cursor command not configured (set DEVFLOW_CURSOR_CMD)" in result.detail
@@ -182,6 +205,7 @@ def test_retry_then_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "cursor",
         prompt,
         worktree,
+        AgentMode.READ_ONLY,
         sleep_fn=sleeps.append,
     )
     assert result.status is AgentStatus.OK
@@ -203,6 +227,7 @@ def test_retry_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         "cursor",
         prompt,
         worktree,
+        AgentMode.READ_ONLY,
         sleep_fn=sleeps.append,
     )
     assert result.status is AgentStatus.BLOCKED
@@ -228,6 +253,7 @@ def test_retry_stops_on_blocked(
         "cursor",
         prompt,
         worktree,
+        AgentMode.READ_ONLY,
         sleep_fn=sleeps.append,
     )
     assert result.status is AgentStatus.BLOCKED
@@ -242,7 +268,60 @@ def test_retry_stops_on_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         "cursor",
         prompt,
         worktree,
+        AgentMode.READ_ONLY,
         sleep_fn=sleeps.append,
     )
     assert result.status is AgentStatus.OK
     assert sleeps == []
+
+
+def test_claude_read_only_command_omits_edit_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CLAUDE_CMD", "claude")
+    argv = _build_command("claude", AgentMode.READ_ONLY, "fix the bug")
+    assert argv is not None
+    assert "--allowedTools" in argv
+    tools = argv[argv.index("--allowedTools") + 1].split(",")
+    assert "Edit" not in tools
+    assert "Write" not in tools
+
+
+def test_claude_edit_command_includes_edit_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CLAUDE_CMD", "claude")
+    argv = _build_command("claude", AgentMode.EDIT, "fix the bug")
+    assert argv is not None
+    tools = argv[argv.index("--allowedTools") + 1].split(",")
+    assert "Edit" in tools
+    assert "Write" in tools
+    assert "acceptEdits" in argv
+
+
+def test_cursor_command_has_no_mode_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CURSOR_CMD", "cursor-agent")
+    for mode in AgentMode:
+        argv = _build_command("cursor", mode, "fix the bug")
+        assert argv == ["cursor-agent"]
+
+
+def test_dangerously_skip_permissions_absent() -> None:
+    needle = "--" + "dangerously-skip-permissions"
+    root = Path(__file__).resolve().parents[1]
+    skip_dirs = {".git", ".venv", "__pycache__", ".mypy_cache", ".ruff_cache"}
+    hits: list[str] = []
+    for path in root.rglob("*"):
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if needle in text:
+            hits.append(path.as_posix())
+    assert hits == []
