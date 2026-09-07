@@ -16,5 +16,5 @@ def repo_root() -> Path:
     return Path(result.stdout.strip())
 
 
-def task_file(task_id: int) -> str:
+def task_file(task_id: int) -> Path:
     return repo_root() / ".devflow" / "tasks" / f"{task_id}.md"
