@@ -17,6 +17,7 @@ from typing import Literal, TypeVar
 
 import yaml
 
+from devflow.freshness import ReviewRecord
 from devflow.policy import (
     ArchitectureImpact,
     Complexity,
@@ -67,6 +68,7 @@ class TaskFrontmatter:
     floor_risk_actual: Risk | None
     floor_matched_actual: list[str]
     blocked_from: str | None
+    review_records: list[ReviewRecord]
 
 
 @dataclass
@@ -170,6 +172,7 @@ def create(
     floor_risk_actual: Risk | None = None,
     floor_matched_actual: list[str] | None = None,
     blocked_from: str | None = None,
+    review_records: list[ReviewRecord] | None = None,
     body: str = "",
 ) -> TaskFile:
     if path.exists():
@@ -193,6 +196,7 @@ def create(
         floor_risk_actual=floor_risk_actual,
         floor_matched_actual=_redact_str_list(floor_matched_actual or []),
         blocked_from=redact(blocked_from) if blocked_from is not None else None,
+        review_records=list(review_records or []),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     _write(path, fm, redact(body) if body else "")
@@ -305,6 +309,7 @@ def _parse_frontmatter(data: dict[str, object]) -> TaskFrontmatter:
             data.get("floor_matched_actual"), "floor_matched_actual"
         ),
         blocked_from=_opt_str(data.get("blocked_from")),
+        review_records=_parse_review_records(data.get("review_records")),
     )
 
 
@@ -389,9 +394,39 @@ def _parse_int_list(value: object, name: str) -> list[int]:
     return result
 
 
+def _parse_review_records(raw: object) -> list[ReviewRecord]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("review_records must be a list")
+    records: list[ReviewRecord] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("each review record must be a mapping")
+        records.append(
+            ReviewRecord(
+                head_sha=_parse_str(item.get("head_sha"), "review_records.head_sha"),
+                base_sha=_parse_str(item.get("base_sha"), "review_records.base_sha"),
+                round=_parse_int(item.get("round"), "review_records.round"),
+                blocking_findings=_parse_int(
+                    item.get("blocking_findings"),
+                    "review_records.blocking_findings",
+                ),
+                unverified_high=_parse_int(
+                    item.get("unverified_high"),
+                    "review_records.unverified_high",
+                ),
+                timestamp=_parse_str(item.get("timestamp"), "review_records.timestamp"),
+            )
+        )
+    return records
+
+
 def _yaml_value(value: object) -> object:
     if isinstance(value, (Risk, Complexity, ArchitectureImpact)):
         return value.value
+    if isinstance(value, ReviewRecord):
+        return dataclasses.asdict(value)
     if isinstance(value, TriageSignals):
         return dataclasses.asdict(value)
     if isinstance(value, list):
@@ -422,6 +457,8 @@ def _redact_str_list(values: list[str]) -> list[str]:
 
 
 def _redact_value(value: object) -> object:
+    if isinstance(value, ReviewRecord):
+        return value
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, list):
