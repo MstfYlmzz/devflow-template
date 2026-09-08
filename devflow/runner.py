@@ -62,8 +62,10 @@ from devflow.states import (
 from devflow.taskfile import (
     TaskFile,
     append_section,
+    body_sections,
     decision_inputs,
     estimate_paths,
+    format_estimated_floor_matches,
     read,
     update_frontmatter,
 )
@@ -274,30 +276,51 @@ def _run_locked(
             f" -> {decision.implementer}, plan {decision.plan_detail}"
         ),
     )
+    tf = _record_floor(path, tf, policy)
     _require_bypass_reason(decision, skip_review, review_advisory, reason)
 
     if after_approval:
+        _require_plan(tf)
         tf = _apply(path, current, Trigger.PLAN_APPROVED, decision, messages)
         return _implement_onward(
             repo, path, tf, decision, policy, skip_review, review_advisory, messages
         )
 
     target = initial_state(decision, _has_epic(tf))
-    tf = _apply(
-        path, current, Trigger.START, decision, messages, has_epic=_has_epic(tf)
-    )
 
     if target is State.TRIAGE:
+        tf = _apply(
+            path, current, Trigger.START, decision, messages, has_epic=_has_epic(tf)
+        )
         tf, decision = _run_triage(
             repo, path, tf, decision, policy, risk_hint, messages
         )
         if State(tf.frontmatter.state) is State.BLOCKED:
             return StartResult(task_id, State.BLOCKED, None, None, None, messages)
-        target = State(tf.frontmatter.state)
 
-    if target is State.PLAN_APPROVAL:
+    worktree: Path | None = None
+    if decision.plan_required:
+        planned = _write_plan(repo, path, tf, decision, policy, messages)
+        if isinstance(planned, StartResult):
+            return planned
+        tf, worktree = planned
+
+    current_state = State(tf.frontmatter.state)
+    if current_state is State.BACKLOG:
+        tf = _apply(
+            path,
+            current_state,
+            Trigger.START,
+            decision,
+            messages,
+            has_epic=_has_epic(tf),
+        )
+    elif current_state is State.TRIAGE:
+        tf = _apply(path, current_state, Trigger.TRIAGE_DONE, decision, messages)
+
+    if State(tf.frontmatter.state) is State.PLAN_APPROVAL:
         _emit(messages, task_id, f"run: devflow approve {task_id}")
-        return StartResult(task_id, State.PLAN_APPROVAL, None, None, None, messages)
+        return StartResult(task_id, State.PLAN_APPROVAL, worktree, None, None, messages)
 
     return _implement_onward(
         repo, path, tf, decision, policy, skip_review, review_advisory, messages
@@ -317,13 +340,7 @@ def _implement_onward(
     task_id = tf.frontmatter.id
     title = tf.frontmatter.title
     timeout = _timeout(policy)
-    resume = gitops.inspect_resume(task_id, repo)
-    worktree = gitops.ensure_task_worktree(repo, task_id, title, BASE_REF)
-    rel = worktree.resolve().relative_to(repo.resolve()).as_posix()
-    if resume.worktree_exists:
-        _emit(messages, task_id, f"worktree {rel} (existing)")
-    else:
-        _emit(messages, task_id, f"worktree {rel}")
+    worktree = _ensure_worktree(repo, task_id, title, messages)
 
     prompt = build_prompt(
         "implementer",
@@ -430,6 +447,75 @@ def _implement_onward(
     )
 
 
+def _write_plan(
+    repo: Path,
+    path: Path,
+    tf: TaskFile,
+    decision: RoutingDecision,
+    policy: dict[str, Any],
+    messages: list[str],
+) -> StartResult | tuple[TaskFile, Path]:
+    task_id = tf.frontmatter.id
+    worktree = _ensure_worktree(repo, task_id, tf.frontmatter.title, messages)
+    role_root = worktree if (worktree / ".ai" / "roles").is_dir() else repo
+    prompt = build_prompt(
+        "implementer",
+        tf,
+        role_root,
+        {"plan_detail": decision.plan_detail},
+        plan_only=True,
+    )
+    result = _run_agent(
+        repo,
+        task_id,
+        decision.implementer,
+        prompt,
+        worktree,
+        AgentMode.READ_ONLY,
+        _timeout(policy),
+        path,
+    )
+    _emit(
+        messages,
+        task_id,
+        (
+            f"implementer ({decision.implementer}, read_only)..."
+            f" {int(result.duration_seconds)}s"
+        ),
+    )
+    if result.status is AgentStatus.BLOCKED:
+        current = State(tf.frontmatter.state)
+        _block(path, current, "IMPLEMENTER_UNAVAILABLE", decision, messages)
+        return StartResult(task_id, State.BLOCKED, worktree, None, None, messages)
+    tf = append_section(path, "Plan", result.output.strip() or "(empty)")
+    return tf, worktree
+
+
+def _ensure_worktree(repo: Path, task_id: int, title: str, messages: list[str]) -> Path:
+    resume = gitops.inspect_resume(task_id, repo)
+    worktree = gitops.ensure_task_worktree(repo, task_id, title, BASE_REF)
+    rel = worktree.resolve().relative_to(repo.resolve()).as_posix()
+    if resume.worktree_exists:
+        _emit(messages, task_id, f"worktree {rel} (existing)")
+    else:
+        _emit(messages, task_id, f"worktree {rel}")
+    return worktree
+
+
+def _record_floor(path: Path, tf: TaskFile, policy: dict[str, Any]) -> TaskFile:
+    _epic, floor, *_rest = decision_inputs(tf, policy)
+    return update_frontmatter(
+        path,
+        floor_risk=floor.risk_floor,
+        floor_matched=format_estimated_floor_matches(floor.matched_rules, tf),
+    )
+
+
+def _require_plan(tf: TaskFile) -> None:
+    if "Plan" not in body_sections(tf):
+        raise RunnerError(f"task {tf.frontmatter.id} has no plan to approve")
+
+
 def _run_triage(
     repo: Path,
     path: Path,
@@ -472,7 +558,6 @@ def _run_triage(
         uncertain=uncertain,
     )
     decision = _decide(tf, policy, risk_hint)
-    tf = _apply(path, State.TRIAGE, Trigger.TRIAGE_DONE, decision, messages)
     return tf, decision
 
 
@@ -610,35 +695,50 @@ def _dry_run(
     )
     _require_bypass_reason(decision, skip_review, review_advisory, reason)
     if after_approval:
+        _require_plan(tf)
         target = State.IMPLEMENTING
     else:
         target = initial_state(decision, _has_epic(tf))
     _emit(messages, task_id, f"{current.value} -> {target.value} (dry-run)")
-    if target is State.PLAN_APPROVAL:
-        _emit(messages, task_id, f"would stop for: devflow approve {task_id}")
-    elif target is State.TRIAGE:
+    if target is State.TRIAGE:
         _emit(messages, task_id, "would run triage (cursor, read_only)")
         _warn_unconfigured(messages, task_id, "cursor", "AGENT_BLOCKED")
     else:
-        rel = gitops.task_worktree(repo, task_id)
-        try:
-            shown = rel.resolve().relative_to(repo.resolve()).as_posix()
-        except ValueError:
-            shown = rel.as_posix()
-        _emit(messages, task_id, f"would open worktree {shown}")
-        _emit(
-            messages,
-            task_id,
-            f"would run implementer ({decision.implementer}, edit)",
-        )
-        _warn_unconfigured(
-            messages, task_id, decision.implementer, "IMPLEMENTER_UNAVAILABLE"
-        )
-        if decision.review_required and not skip_review:
-            _emit(messages, task_id, "would run reviewer (claude, review)")
-            _warn_unconfigured(messages, task_id, "claude", "REVIEWER_UNAVAILABLE")
+        if decision.plan_required or target is State.IMPLEMENTING:
+            rel = gitops.task_worktree(repo, task_id)
+            try:
+                shown = rel.resolve().relative_to(repo.resolve()).as_posix()
+            except ValueError:
+                shown = rel.as_posix()
+            _emit(messages, task_id, f"would open worktree {shown}")
+        if decision.plan_required and not after_approval:
+            _emit(
+                messages,
+                task_id,
+                (
+                    f"would run implementer ({decision.implementer}, read_only)"
+                    " to write the plan"
+                ),
+            )
+            _warn_unconfigured(
+                messages, task_id, decision.implementer, "IMPLEMENTER_UNAVAILABLE"
+            )
+        if target is State.PLAN_APPROVAL:
+            _emit(messages, task_id, f"would stop for: devflow approve {task_id}")
         else:
-            _emit(messages, task_id, "would skip review")
+            _emit(
+                messages,
+                task_id,
+                f"would run implementer ({decision.implementer}, edit)",
+            )
+            _warn_unconfigured(
+                messages, task_id, decision.implementer, "IMPLEMENTER_UNAVAILABLE"
+            )
+            if decision.review_required and not skip_review:
+                _emit(messages, task_id, "would run reviewer (claude, review)")
+                _warn_unconfigured(messages, task_id, "claude", "REVIEWER_UNAVAILABLE")
+            else:
+                _emit(messages, task_id, "would skip review")
     _emit(messages, task_id, "dry-run: no lock, no worktree, no agent, no file changes")
     return StartResult(task_id, current, None, None, None, messages)
 

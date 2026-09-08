@@ -108,22 +108,45 @@ def estimate_paths(tf: TaskFile) -> list[str]:
     gate. These candidates only feed apply_floor so a module name like
     ``authority`` can match ``devflow/**`` before any code exists.
     """
-    paths: list[str] = []
+    return [path for path, _origin in _estimated(tf)]
+
+
+def format_estimated_floor_matches(matched_rules: list[str], tf: TaskFile) -> list[str]:
+    """Rewrite floor hits so estimates are not stored as real diff paths."""
+    origins = {path: origin for path, origin in _estimated(tf)}
+    formatted: list[str] = []
+    seen: set[str] = set()
+    for rule in matched_rules:
+        glob, sep, rest = rule.partition(" (path: ")
+        if sep:
+            path = rest[:-1] if rest.endswith(")") else rest
+            origin = origins.get(path)
+            if origin:
+                rule = f"{glob} (from {origin})"
+        if rule not in seen:
+            seen.add(rule)
+            formatted.append(rule)
+    return formatted
+
+
+def _estimated(tf: TaskFile) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    def add(item: str) -> None:
+    def add(item: str, origin: str) -> None:
         if item and item not in seen:
             seen.add(item)
-            paths.append(item)
+            items.append((item, origin))
 
     for module in tf.frontmatter.modules:
         name = module.strip().replace("\\", "/").strip("/")
         if not name:
             continue
-        add(f"devflow/{name}.py")
-        add(f"src/{name}/**")
-        add(f"**/{name}/**")
-        add(f"**/*{name}*")
+        origin = f"module: {name}"
+        add(f"devflow/{name}.py", origin)
+        add(f"src/{name}/**", origin)
+        add(f"**/{name}/**", origin)
+        add(f"**/*{name}*", origin)
 
     text = tf.body.replace("\\", "/")
     for raw in _ISSUE_TOKEN.findall(text):
@@ -133,8 +156,8 @@ def estimate_paths(tf: TaskFile) -> list[str]:
         suffix = Path(token).suffix
         if len(suffix) < 2 or not suffix[1:].isalnum():
             continue
-        add(token)
-    return paths
+        add(token, "issue")
+    return items
 
 
 def decision_inputs(

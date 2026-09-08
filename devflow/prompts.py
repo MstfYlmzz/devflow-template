@@ -15,7 +15,14 @@ _HEADING_RE = re.compile(r"^## ([^#].*?)\s*$", re.MULTILINE)
 _REVIEWER_HIDDEN_HEADINGS = frozenset({"Plan", "Implementation"})
 
 
-def build_prompt(role: str, task: TaskFile, repo: Path, extra: dict[str, Any]) -> str:
+def build_prompt(
+    role: str,
+    task: TaskFile,
+    repo: Path,
+    extra: dict[str, Any],
+    *,
+    plan_only: bool = False,
+) -> str:
     if role not in _ROLES:
         raise ValueError(f"unknown role: {role}")
     role_path = repo / ".ai" / "roles" / f"{role}.md"
@@ -29,7 +36,7 @@ def build_prompt(role: str, task: TaskFile, repo: Path, extra: dict[str, Any]) -
     if role == "reviewer":
         chunks.extend(_reviewer_context(task, repo, extra))
     elif role == "implementer":
-        chunks.extend(_implementer_context(task, extra))
+        chunks.extend(_implementer_context(task, extra, plan_only=plan_only))
     else:
         chunks.extend(_triage_context(task, extra))
     text = "\n".join(chunks).rstrip() + "\n"
@@ -44,14 +51,24 @@ def _triage_context(task: TaskFile, extra: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _implementer_context(task: TaskFile, extra: dict[str, Any]) -> list[str]:
+def _implementer_context(
+    task: TaskFile, extra: dict[str, Any], *, plan_only: bool
+) -> list[str]:
     detail = extra.get("plan_detail", "none")
-    return [
-        "",
-        f"plan_detail: {detail}",
-        "",
-        task.body.strip() or "(empty task body)",
-    ]
+    lines = ["", f"plan_detail: {detail}"]
+    if plan_only:
+        lines.extend(["", "plan_only: true", "", _plan_only_instructions(str(detail))])
+    lines.extend(["", task.body.strip() or "(empty task body)"])
+    return lines
+
+
+def _plan_only_instructions(detail: str) -> str:
+    if detail == "formal":
+        return (
+            "Write only a plan. Do not change any code.\n"
+            "Include a file list, architectural impact, and the test approach."
+        )
+    return "Write only a plan. Do not change any code.\nUse a short bullet list."
 
 
 def _reviewer_context(task: TaskFile, repo: Path, extra: dict[str, Any]) -> list[str]:
