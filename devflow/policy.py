@@ -339,10 +339,15 @@ def decide(
         if isinstance(raw_route, dict):
             risk_route = raw_route
     detail = plan_detail_for(chosen_complexity)
-    plan_required = detail != "none"
     plan_approval_required = risk_route.get("plan_approval") is True
     if architecture_impact in {ArchitectureImpact.POSSIBLE, ArchitectureImpact.YES}:
         plan_approval_required = True
+    # Approval needs an artifact to approve. Complexity still
+    # chooses plan depth; approval only sets a floor of "brief".
+    if plan_approval_required and detail == "none":
+        detail = "brief"
+        reasons.append("plan raised to brief: approval required")
+    plan_required = detail != "none"
     review_required = risk_route.get("review") is True
     evidence_required = risk_route.get("evidence") is True
 

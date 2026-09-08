@@ -296,6 +296,43 @@ def test_plan_detail_follows_complexity() -> None:
         assert decision.plan_required is (detail != "none")
 
 
+def test_high_risk_low_complexity_raises_plan_to_brief() -> None:
+    policy = _policy()
+    floor = PolicyResult(Risk.HIGH, None, False, [])
+    decision = decide(
+        floor,
+        _quiet(),
+        Complexity.LOW,
+        ArchitectureImpact.NONE,
+        False,
+        None,
+        ["src/auth/login.py"],
+        policy,
+    )
+    assert decision.plan_detail == "brief"
+    assert decision.plan_required is True
+    assert decision.plan_approval_required is True
+    assert "plan raised to brief: approval required" in decision.reasons
+
+
+def test_high_risk_high_complexity_keeps_formal_plan() -> None:
+    policy = _policy()
+    floor = PolicyResult(Risk.HIGH, None, False, [])
+    decision = decide(
+        floor,
+        _quiet(),
+        Complexity.HIGH,
+        ArchitectureImpact.NONE,
+        False,
+        None,
+        ["src/auth/login.py"],
+        policy,
+    )
+    assert decision.plan_detail == "formal"
+    assert decision.plan_approval_required is True
+    assert "plan raised to brief: approval required" not in decision.reasons
+
+
 def test_low_risk_high_complexity_formal_plan_without_approval() -> None:
     policy = _policy()
     floor = PolicyResult(Risk.LOW, None, False, [])
@@ -312,6 +349,24 @@ def test_low_risk_high_complexity_formal_plan_without_approval() -> None:
     assert decision.risk is Risk.LOW
     assert decision.complexity is Complexity.HIGH
     assert decision.plan_detail == "formal"
+    assert decision.plan_approval_required is False
+
+
+def test_low_risk_low_complexity_has_no_plan() -> None:
+    policy = _policy()
+    floor = PolicyResult(Risk.LOW, None, False, [])
+    decision = decide(
+        floor,
+        _quiet(),
+        Complexity.LOW,
+        ArchitectureImpact.NONE,
+        False,
+        None,
+        ["styles/main.css"],
+        policy,
+    )
+    assert decision.plan_detail == "none"
+    assert decision.plan_required is False
     assert decision.plan_approval_required is False
 
 
