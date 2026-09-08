@@ -27,6 +27,7 @@ from devflow.policy import (
     apply_floor,
     check_merge_gate,
     decide,
+    fast_lane_eligible,
     load_policy,
     needed_triage_fields,
     validate_policy,
@@ -580,6 +581,20 @@ def _cmd_task_transition(
     return 0
 
 
+def _cmd_fast_lane_check(*, paths_arg: str) -> int:
+    try:
+        policy = load_policy(_policy_path())
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    eligible, reason = fast_lane_eligible(_split_csv(paths_arg), policy)
+    if eligible:
+        print(f"eligible: yes — {reason}")
+        return 0
+    print(f"eligible: no — {reason}")
+    return 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -597,6 +612,9 @@ def main() -> None:
     merge_parser = sub.add_parser("check-merge")
     merge_parser.add_argument("--risk", required=True)
     merge_parser.add_argument("--paths", required=True)
+
+    fast_parser = sub.add_parser("fast-lane-check")
+    fast_parser.add_argument("--paths", required=True)
 
     sub.add_parser("doctor")
     sub.add_parser("agent-check")
@@ -632,6 +650,8 @@ def main() -> None:
         )
     if args.command == "check-merge":
         raise SystemExit(_cmd_check_merge(risk_arg=args.risk, paths_arg=args.paths))
+    if args.command == "fast-lane-check":
+        raise SystemExit(_cmd_fast_lane_check(paths_arg=args.paths))
     if args.command == "agent-check":
         raise SystemExit(_cmd_agent_check())
     if args.command == "agent-smoke":

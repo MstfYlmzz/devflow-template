@@ -1,0 +1,60 @@
+# This workflow lives under .github/workflows/**, which is a CONTROL_PATH.
+# A PR that changes it must not also change unrelated application code.
+name: fast-lane-guard
+
+on:
+  pull_request:
+
+jobs:
+  fast-lane-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - name: Require a task unless every path is fast-lane eligible
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: |
+          python <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          from devflow.authority import is_control_change
+          from devflow.policy import fast_lane_eligible, load_policy
+
+          base_ref = os.environ["BASE_REF"]
+          diff = subprocess.run(
+              ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+          if diff.returncode != 0:
+              print(diff.stderr or diff.stdout, file=sys.stderr)
+              sys.exit(1)
+          changed = [line.replace("\\", "/") for line in diff.stdout.splitlines() if line]
+          if any(path.startswith(".devflow/tasks/") for path in changed):
+              print("task file present — fast lane guard skipped")
+              sys.exit(0)
+          if is_control_change(changed):
+              print("control-path change — fast lane guard skipped")
+              sys.exit(0)
+          policy_path = Path(".ai/policy.yml")
+          if not policy_path.is_file():
+              policy_path = Path("templates/project/.ai/policy.yml")
+          policy = load_policy(policy_path)
+          eligible, reason = fast_lane_eligible(changed, policy)
+          if eligible:
+              print(f"fast lane eligible: {reason}")
+              sys.exit(0)
+          print(f"fast lane not eligible: {reason}", file=sys.stderr)
+          print("open an issue and run: devflow start <id>", file=sys.stderr)
+          sys.exit(1)
+          PY
