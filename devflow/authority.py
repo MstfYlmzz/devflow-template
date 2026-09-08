@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from devflow.policy import load_policy
+from devflow.policy import load_policy, validate_policy
 
 STRIP_ENV_KEYS: tuple[str, ...] = (
     "GH_TOKEN",
@@ -105,6 +105,7 @@ def load_policy_from_base(repo: Path, base_ref: str = "origin/main") -> dict[str
 
     A branch must not be able to weaken the rules that review it. If the
     base ref is missing, this fails instead of falling back to the worktree.
+    An invalid base policy fails instead of producing a silent default.
     """
     spec = f"{base_ref}:.ai/policy.yml"
     result = subprocess.run(
@@ -130,12 +131,28 @@ def load_policy_from_base(repo: Path, base_ref: str = "origin/main") -> dict[str
     try:
         handle.write(result.stdout)
         handle.close()
-        return load_policy(tmp_path)
+        policy = load_policy(tmp_path)
     finally:
         tmp_path.unlink(missing_ok=True)
+    errors = validate_policy(policy)
+    if errors:
+        listed = "\n".join(f"  {line}" for item in errors for line in item.splitlines())
+        raise RuntimeError(
+            f"policy at {base_ref} is invalid:\n{listed}\n"
+            "fix and merge before running devflow start"
+        )
+    return policy
 
 
 def check_control_changes(changed: list[str]) -> ControlChangeResult:
+    if not changed:
+        return ControlChangeResult(
+            touches_control=False,
+            control_files=[],
+            unrelated_code_files=[],
+            ok=True,
+            message="",
+        )
     control_files: list[str] = []
     unrelated_code_files: list[str] = []
     for raw in changed:

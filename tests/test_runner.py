@@ -36,7 +36,14 @@ def _origin_main(repo: Path) -> None:
 def _seed(repo: Path) -> None:
     ai = repo / ".ai" / "roles"
     ai.mkdir(parents=True)
-    (repo / ".ai" / "policy.yml").write_text(_POLICY, encoding="utf-8")
+    (repo / ".ai" / "policy.yml").write_text(
+        _POLICY.replace(
+            "reviewed_for_this_project: false",
+            "reviewed_for_this_project: true",
+            1,
+        ),
+        encoding="utf-8",
+    )
     for path in (_TEMPLATES / ".ai" / "roles").iterdir():
         (ai / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     (repo / "src").mkdir()

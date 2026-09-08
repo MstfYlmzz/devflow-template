@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from devflow.authority import (
 from tests.conftest import git
 
 _MIN_POLICY = {
+    "reviewed_for_this_project": True,
     "floor": {},
     "signal_floor": {},
     "routing": {
@@ -84,6 +86,36 @@ def test_load_policy_from_base_missing_ref_errors(git_repo: Path) -> None:
     _write_policy(git_repo, "worktree-only")
     with pytest.raises(RuntimeError, match="no working-tree fallback"):
         load_policy_from_base(git_repo, base_ref="origin/main")
+
+
+def test_load_policy_from_base_rejects_invalid_policy(git_repo: Path) -> None:
+    policy = copy.deepcopy(_MIN_POLICY)
+    del policy["routing"]["risk"]["HIGH"]
+    path = git_repo / ".ai" / "policy.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(policy), encoding="utf-8")
+    git(git_repo, "add", ".ai/policy.yml")
+    git(git_repo, "commit", "-m", "invalid policy")
+    with pytest.raises(RuntimeError, match="policy at main is invalid") as exc:
+        load_policy_from_base(git_repo, base_ref="main")
+    message = str(exc.value)
+    assert "routing.risk is missing level: HIGH" in message
+    assert "fix and merge before running devflow start" in message
+
+
+def test_load_policy_from_base_accepts_valid_policy(git_repo: Path) -> None:
+    _write_policy(git_repo, "ok")
+    git(git_repo, "add", ".ai/policy.yml")
+    git(git_repo, "commit", "-m", "valid policy")
+    loaded = load_policy_from_base(git_repo, base_ref="main")
+    assert loaded["marker"] == "ok"
+
+
+def test_control_empty_list_ok() -> None:
+    result = check_control_changes([])
+    assert result.ok is True
+    assert result.touches_control is False
+    assert result.control_files == []
 
 
 def test_control_policy_only_ok() -> None:

@@ -57,6 +57,15 @@ def test_report_css_is_fast_lane_ok() -> None:
     )
 
 
+def test_report_empty_diff_skips_fast_lane() -> None:
+    code, text = ci_checks_report([], _POLICY)
+    assert code == 0
+    assert text == (
+        "control files: ok (0 control paths, no unrelated code)\n"
+        "fast lane:     skipped (no changes)\n"
+    )
+
+
 def test_report_task_file_skips_fast_lane() -> None:
     code, text = ci_checks_report(
         [".devflow/tasks/184.md", "src/orders/service.py"],
@@ -95,6 +104,19 @@ def test_cmd_ci_checks_mixed_control_and_src(
     assert capsys.readouterr().out == (
         "control files: FAIL — .ai/policy.yml alongside src/orders/service.py\n"
         "fast lane:     skipped\n"
+    )
+
+
+def test_cmd_ci_checks_empty_diff(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    git(git_repo, "commit", "--allow-empty", "-m", "base")
+    monkeypatch.setattr("devflow.cli.repo_root", lambda: git_repo)
+    monkeypatch.chdir(git_repo)
+    assert _cmd_ci_checks(base="main") == 0
+    assert capsys.readouterr().out == (
+        "control files: ok (0 control paths, no unrelated code)\n"
+        "fast lane:     skipped (no changes)\n"
     )
 
 

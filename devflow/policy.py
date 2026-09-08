@@ -445,7 +445,7 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
         risk_table = {}
     for level in _LEVELS:
         if level not in risk_table:
-            errors.append(f"routing.risk missing {level}")
+            errors.append(f"routing.risk is missing level: {level}")
 
     signal_floor = policy.get("signal_floor") or {}
     if isinstance(signal_floor, dict):

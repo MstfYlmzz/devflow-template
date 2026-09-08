@@ -447,7 +447,7 @@ def test_validate_policy_missing_risk_table_lists_each_level() -> None:
     joined = "\n".join(errors)
     assert "routing table missing risk levels" in joined
     for level in ("LOW", "MEDIUM", "HIGH"):
-        assert f"routing.risk missing {level}" in joined
+        assert f"routing.risk is missing level: {level}" in joined
 
 
 def test_repo_policy_has_complete_risk_table() -> None:
