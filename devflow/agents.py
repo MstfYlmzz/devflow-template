@@ -9,6 +9,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from devflow.authority import sanitized_env
+
 COMMANDS: dict[str, str] = {
     "cursor": "DEVFLOW_CURSOR_CMD",
     "codex": "DEVFLOW_CODEX_CMD",
@@ -147,6 +149,7 @@ def run(
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=sanitized_env(),
         )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""

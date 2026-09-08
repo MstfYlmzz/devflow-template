@@ -1,3 +1,4 @@
+# TODO: fast lane eligibility is inverted — see step 9
 name: verify
 
 on:
