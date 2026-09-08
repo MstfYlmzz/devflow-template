@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import stat
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,19 +9,8 @@ import pytest
 from devflow.init import init
 
 
-def _git_init(path: Path) -> None:
-    subprocess.run(
-        ["git", "init"],
-        cwd=path,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-
-def test_init_creates_expected_files(tmp_path: Path) -> None:
-    _git_init(tmp_path)
-    report = init(tmp_path)
+def test_init_creates_expected_files(git_repo: Path) -> None:
+    report = init(git_repo)
 
     expected_files = [
         "AGENTS.md",
@@ -42,15 +30,15 @@ def test_init_creates_expected_files(tmp_path: Path) -> None:
         "scripts/setup-hooks",
     ]
     for rel in expected_files:
-        dest = tmp_path / rel
+        dest = git_repo / rel
         assert dest.is_file()
         assert dest in report.created
 
-    assert (tmp_path / "docs/architecture").is_dir()
-    assert (tmp_path / "docs/requirements").is_dir()
-    assert (tmp_path / ".ai").is_dir()
-    assert (tmp_path / ".devflow/tasks").is_dir()
-    assert not (tmp_path / "docs/architecture/.gitkeep").exists()
+    assert (git_repo / "docs/architecture").is_dir()
+    assert (git_repo / "docs/requirements").is_dir()
+    assert (git_repo / ".ai").is_dir()
+    assert (git_repo / ".devflow/tasks").is_dir()
+    assert not (git_repo / "docs/architecture/.gitkeep").exists()
 
 
 def test_init_requires_git_repo(tmp_path: Path) -> None:
@@ -58,20 +46,18 @@ def test_init_requires_git_repo(tmp_path: Path) -> None:
         init(tmp_path)
 
 
-def test_init_skips_existing_file(tmp_path: Path) -> None:
-    _git_init(tmp_path)
-    existing = tmp_path / "AGENTS.md"
+def test_init_skips_existing_file(git_repo: Path) -> None:
+    existing = git_repo / "AGENTS.md"
     existing.write_text("keep me\n", encoding="utf-8")
-    report = init(tmp_path)
+    report = init(git_repo)
     assert existing.read_text(encoding="utf-8") == "keep me\n"
     assert existing in report.skipped
     assert existing not in report.created
 
 
-def test_init_does_not_copy_language_stages(tmp_path: Path) -> None:
-    _git_init(tmp_path)
-    init(tmp_path)
-    names = {path.name for path in (tmp_path / "scripts/verify.d").iterdir()}
+def test_init_does_not_copy_language_stages(git_repo: Path) -> None:
+    init(git_repo)
+    names = {path.name for path in (git_repo / "scripts/verify.d").iterdir()}
     assert "00-preflight" in names
     assert "10-format" not in names
     assert "20-lint" not in names
@@ -80,8 +66,7 @@ def test_init_does_not_copy_language_stages(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable bit")
-def test_copied_verify_is_executable(tmp_path: Path) -> None:
-    _git_init(tmp_path)
-    init(tmp_path)
-    mode = (tmp_path / "scripts/verify").stat().st_mode
+def test_copied_verify_is_executable(git_repo: Path) -> None:
+    init(git_repo)
+    mode = (git_repo / "scripts/verify").stat().st_mode
     assert mode & stat.S_IXUSR

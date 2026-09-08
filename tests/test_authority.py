@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,6 +14,7 @@ from devflow.authority import (
     load_policy_from_base,
     sanitized_env,
 )
+from tests.conftest import git
 
 _MIN_POLICY = {
     "floor": {},
@@ -29,33 +28,6 @@ _MIN_POLICY = {
         },
     },
 }
-
-
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "devflow",
-        "GIT_AUTHOR_EMAIL": "devflow@example.com",
-        "GIT_COMMITTER_NAME": "devflow",
-        "GIT_COMMITTER_EMAIL": "devflow@example.com",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_SYSTEM": os.devnull,
-    }
-    return subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=devflow",
-            "-c",
-            "user.email=devflow@example.com",
-            *args,
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-        env=env,
-    )
 
 
 def _write_policy(repo: Path, marker: str) -> None:
@@ -93,30 +65,25 @@ def test_sanitized_env_keeps_path_from_os(monkeypatch: pytest.MonkeyPatch) -> No
     assert "GH_TOKEN" not in env
 
 
-def test_load_policy_from_base_ignores_worktree(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
+def test_load_policy_from_base_ignores_worktree(git_repo: Path) -> None:
+    repo = git_repo
     _write_policy(repo, "base-A")
-    _git(repo, "add", ".ai/policy.yml")
-    _git(repo, "commit", "-m", "base policy")
-    _git(repo, "checkout", "-b", "topic")
+    git(repo, "add", ".ai/policy.yml")
+    git(repo, "commit", "-m", "base policy")
+    git(repo, "checkout", "-b", "topic")
     _write_policy(repo, "branch-B")
-    _git(repo, "add", ".ai/policy.yml")
-    _git(repo, "commit", "-m", "weaken policy")
+    git(repo, "add", ".ai/policy.yml")
+    git(repo, "commit", "-m", "weaken policy")
     loaded = load_policy_from_base(repo, base_ref="main")
     assert loaded["marker"] == "base-A"
     worktree = yaml.safe_load((repo / ".ai" / "policy.yml").read_text(encoding="utf-8"))
     assert worktree["marker"] == "branch-B"
 
 
-def test_load_policy_from_base_missing_ref_errors(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    _write_policy(repo, "worktree-only")
+def test_load_policy_from_base_missing_ref_errors(git_repo: Path) -> None:
+    _write_policy(git_repo, "worktree-only")
     with pytest.raises(RuntimeError, match="no working-tree fallback"):
-        load_policy_from_base(repo, base_ref="origin/main")
+        load_policy_from_base(git_repo, base_ref="origin/main")
 
 
 def test_control_policy_only_ok() -> None:

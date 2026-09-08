@@ -1,62 +1,32 @@
 from __future__ import annotations
 
 import inspect
-import os
-import subprocess
 from pathlib import Path
 
 from devflow.gitops import rebase_onto_base
+from tests.conftest import git
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "devflow",
-        "GIT_AUTHOR_EMAIL": "devflow@example.com",
-        "GIT_COMMITTER_NAME": "devflow",
-        "GIT_COMMITTER_EMAIL": "devflow@example.com",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_SYSTEM": os.devnull,
-    }
-    return subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=devflow",
-            "-c",
-            "user.email=devflow@example.com",
-            *args,
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-        env=env,
-    )
-
-
-def test_rebase_onto_base_returns_new_head(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
+def test_rebase_onto_base_returns_new_head(git_repo: Path) -> None:
+    repo = git_repo
     (repo / "base.txt").write_text("main\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "main")
-    _git(repo, "checkout", "-b", "task")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-m", "main")
+    git(repo, "checkout", "-b", "task")
     (repo / "feature.txt").write_text("task\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "task")
-    _git(repo, "checkout", "main")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-m", "task")
+    git(repo, "checkout", "main")
     (repo / "moved.txt").write_text("moved\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "main moved")
-    _git(repo, "checkout", "task")
-    old = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "add", "-A")
+    git(repo, "commit", "-m", "main moved")
+    git(repo, "checkout", "task")
+    old = git(repo, "rev-parse", "HEAD").stdout.strip()
     new = rebase_onto_base(repo, "main")
     assert new != old
     assert (repo / "feature.txt").is_file()
     assert (repo / "moved.txt").is_file()
-    log = _git(repo, "log", "--oneline").stdout
+    log = git(repo, "log", "--oneline").stdout
     assert "main moved" in log
 
 

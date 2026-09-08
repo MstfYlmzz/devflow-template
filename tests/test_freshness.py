@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 
 from devflow.freshness import (
@@ -10,49 +8,21 @@ from devflow.freshness import (
     check_decision_validity,
 )
 from devflow.taskfile import append_section, create
-
-
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "devflow",
-        "GIT_AUTHOR_EMAIL": "devflow@example.com",
-        "GIT_COMMITTER_NAME": "devflow",
-        "GIT_COMMITTER_EMAIL": "devflow@example.com",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_SYSTEM": os.devnull,
-    }
-    return subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=devflow",
-            "-c",
-            "user.email=devflow@example.com",
-            *args,
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-        env=env,
-    )
+from tests.conftest import git
 
 
 def _sha(repo: Path) -> str:
-    return _git(repo, "rev-parse", "HEAD").stdout.strip()
+    return git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
 def _commit(repo: Path, message: str) -> str:
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", message)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-m", message)
     return _sha(repo)
 
 
-def _repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
+def _app_repo(git_repo: Path) -> Path:
+    repo = git_repo
     (repo / "src").mkdir()
     (repo / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
     task = repo / ".devflow" / "tasks"
@@ -73,16 +43,16 @@ def _record(head: str, base: str) -> ReviewRecord:
     )
 
 
-def test_code_freshness_same_head_is_fresh(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
+def test_code_freshness_same_head_is_fresh(git_repo: Path) -> None:
+    repo = _app_repo(git_repo)
     head = _sha(repo)
     result = check_code_freshness(repo, _record(head, head), head, head)
     assert result.fresh is True
     assert result.changed_since_review == []
 
 
-def test_code_freshness_only_task_file_change_is_fresh(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
+def test_code_freshness_only_task_file_change_is_fresh(git_repo: Path) -> None:
+    repo = _app_repo(git_repo)
     reviewed = _sha(repo)
     (repo / ".devflow" / "tasks" / "184.md").write_text("reviewed\n", encoding="utf-8")
     current = _commit(repo, "write review into task file")
@@ -96,8 +66,8 @@ def test_code_freshness_only_task_file_change_is_fresh(tmp_path: Path) -> None:
     assert result.changed_since_review == []
 
 
-def test_code_freshness_source_change_is_stale(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
+def test_code_freshness_source_change_is_stale(git_repo: Path) -> None:
+    repo = _app_repo(git_repo)
     reviewed = _sha(repo)
     (repo / "src" / "app.py").write_text("print('changed')\n", encoding="utf-8")
     (repo / "tests").mkdir()
@@ -114,14 +84,14 @@ def test_code_freshness_source_change_is_stale(tmp_path: Path) -> None:
     assert "2 files changed since review" in result.reason
 
 
-def test_code_freshness_base_moved_head_same_is_stale(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
+def test_code_freshness_base_moved_head_same_is_stale(git_repo: Path) -> None:
+    repo = _app_repo(git_repo)
     reviewed = _sha(repo)
-    _git(repo, "checkout", "-b", "task")
-    _git(repo, "checkout", "main")
+    git(repo, "checkout", "-b", "task")
+    git(repo, "checkout", "main")
     (repo / "other.py").write_text("x = 1\n", encoding="utf-8")
     moved_base = _commit(repo, "main moved")
-    _git(repo, "checkout", "task")
+    git(repo, "checkout", "task")
     head = _sha(repo)
     assert head == reviewed
     result = check_code_freshness(
