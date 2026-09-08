@@ -2,10 +2,12 @@
 
 rebase_onto_base() rewrites the worktree onto base_ref and returns the new
 HEAD SHA. It does not push. Force-with-lease belongs only at push time.
+The runner calls this after the implementer commit and before review.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -62,6 +64,75 @@ def task_worktree(repo: Path, task_id: int) -> Path:
     return repo / ".devflow" / "worktrees" / f"task-{task_id}"
 
 
+def review_worktree_path(repo: Path, task_id: int, round_no: int) -> Path:
+    return repo / ".devflow" / "worktrees" / f"review-{task_id}-r{round_no}"
+
+
+def slugify(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-")
+    return slug or "task"
+
+
+def commit_all(worktree: Path, message: str) -> str:
+    git_output(worktree, "add", "-A")
+    porcelain = git_output(worktree, "status", "--porcelain")
+    if porcelain.strip():
+        git_output(worktree, "commit", "-m", message)
+    return git_output(worktree, "rev-parse", "HEAD")
+
+
+def ensure_task_worktree(repo: Path, task_id: int, title: str, base_ref: str) -> Path:
+    path = task_worktree(repo, task_id)
+    if path.is_dir():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = task_branch_name(repo, task_id)
+    if existing:
+        git_output(repo, "worktree", "add", str(path), existing)
+        return path
+    branch = f"task/{task_id}-{slugify(title)}"
+    git_output(repo, "worktree", "add", "-b", branch, str(path), base_ref)
+    return path
+
+
+def add_review_worktree(
+    repo: Path, task_id: int, round_no: int, start_point: str
+) -> Path:
+    path = review_worktree_path(repo, task_id, round_no)
+    if path.is_dir():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    branch = f"review/{task_id}-r{round_no}"
+    git_output(repo, "worktree", "add", "-b", branch, str(path), start_point)
+    return path
+
+
+def remove_worktree(repo: Path, path: Path) -> None:
+    if not path.exists():
+        return
+    removed = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(path)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if removed.returncode == 0:
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def delete_local_branch(repo: Path, name: str) -> None:
+    subprocess.run(
+        ["git", "branch", "-D", name],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def inspect_resume(task_id: int, repo: Path) -> ResumeContext:
     worktree = task_worktree(repo, task_id)
     worktree_exists = worktree.is_dir()
@@ -111,20 +182,7 @@ def _has_git_dir(path: Path) -> bool:
 
 
 def remove_task_worktree(repo: Path, task_id: int) -> None:
-    worktree = task_worktree(repo, task_id)
-    if not worktree.exists():
-        return
-    removed = subprocess.run(
-        ["git", "worktree", "remove", "--force", str(worktree)],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if removed.returncode == 0:
-        return
-    if worktree.exists():
-        shutil.rmtree(worktree)
+    remove_worktree(repo, task_worktree(repo, task_id))
 
 
 def _task_branches(repo: Path, task_id: int) -> list[str]:

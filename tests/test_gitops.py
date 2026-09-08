@@ -40,8 +40,9 @@ def test_rebase_onto_base_does_not_push() -> None:
 
 def test_rebase_onto_base_is_not_called_elsewhere() -> None:
     root = Path(__file__).resolve().parents[1] / "devflow"
+    allowed = {"gitops.py", "runner.py"}
     for path in root.rglob("*.py"):
-        if path.name == "gitops.py":
+        if path.name in allowed:
             continue
         text = path.read_text(encoding="utf-8")
         assert "rebase_onto_base" not in text

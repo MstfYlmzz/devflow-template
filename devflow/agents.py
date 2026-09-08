@@ -221,6 +221,8 @@ def run(
     worktree: Path,
     mode: AgentMode,
     timeout_minutes: float = 20,
+    env: dict[str, str] | None = None,
+    on_spawn: Callable[[int], None] | None = None,
 ) -> AgentResult:
     if agent not in COMMANDS:
         raise ValueError(f"unknown agent: {agent}")
@@ -247,7 +249,7 @@ def run(
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
-        "env": sanitized_env(),
+        "env": sanitized_env() if env is None else env,
     }
     if os.name == "nt":
         popen_kwargs["creationflags"] = getattr(
@@ -256,6 +258,8 @@ def run(
     else:
         popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(argv, **popen_kwargs)  # type: ignore[call-overload]
+    if on_spawn is not None:
+        on_spawn(proc.pid)
     try:
         stdout, stderr = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:

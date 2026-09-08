@@ -24,6 +24,7 @@ _REVIEWED_ERROR = (
 
 EnumT = TypeVar("EnumT", bound=enum.Enum)
 BypassFriction = Literal["none", "reason"]
+PlanDetail = Literal["none", "brief", "formal"]
 
 
 class Risk(enum.StrEnum):
@@ -79,6 +80,7 @@ class RoutingDecision:
     implementer: str
     plan_required: bool
     plan_approval_required: bool
+    plan_detail: PlanDetail
     review_required: bool
     evidence_required: bool
     bypass_allowed: bool
@@ -143,6 +145,14 @@ def _rule_glob(matched: str) -> str:
 
 def _friction(risk: Risk) -> BypassFriction:
     return "none" if risk is Risk.LOW else "reason"
+
+
+def plan_detail_for(complexity: Complexity) -> PlanDetail:
+    if complexity is Complexity.LOW:
+        return "none"
+    if complexity is Complexity.MEDIUM:
+        return "brief"
+    return "formal"
 
 
 def _rule_patterns(rule: dict[str, Any]) -> list[str]:
@@ -323,10 +333,13 @@ def decide(
         routing.get("complexity", {}).get(chosen_complexity.value, "cursor")
     )
     risk_route = routing.get("risk", {}).get(risk.value, {})
-    plan = str(risk_route.get("plan", "none"))
     review = str(risk_route.get("review", "none"))
-    plan_required = plan != "none"
-    plan_approval_required = plan == "formal_with_human_approval"
+    detail = plan_detail_for(chosen_complexity)
+    plan_required = detail != "none"
+    plan_approval_required = risk is Risk.HIGH or architecture_impact in {
+        ArchitectureImpact.POSSIBLE,
+        ArchitectureImpact.YES,
+    }
     review_required = review != "none"
     evidence_required = review == "required_with_evidence"
 
@@ -340,6 +353,7 @@ def decide(
         implementer=implementer,
         plan_required=plan_required,
         plan_approval_required=plan_approval_required,
+        plan_detail=detail,
         review_required=review_required,
         evidence_required=evidence_required,
         bypass_allowed=True,

@@ -54,6 +54,7 @@ from devflow.policy import (
     needed_triage_fields,
     validate_policy,
 )
+from devflow.runner import RunnerError, StartResult, approve, cancel, start, stop
 from devflow.states import (
     InvalidTransition,
     State,
@@ -329,12 +330,15 @@ def _cmd_classify(
     if complexity_needed:
         complexity_text = "? (triage needed)"
         implementer_text = "? (depends on complexity)"
+        plan_detail_text = "? (depends on complexity)"
     elif epic is not None and epic.complexity is not None:
         complexity_text = f"{decision.complexity.value}  (epic proposal)"
         implementer_text = decision.implementer
+        plan_detail_text = decision.plan_detail
     else:
         complexity_text = decision.complexity.value
         implementer_text = decision.implementer
+        plan_detail_text = decision.plan_detail
 
     review_text = "required" if decision.review_required else "not required"
     bypass_text = f"allowed (friction: {decision.bypass_friction})"
@@ -342,6 +346,7 @@ def _cmd_classify(
     print(f"{'risk:':<13}{decision.risk.value}{risk_reason}")
     print(f"{'complexity:':<13}{complexity_text}")
     print(f"{'implementer:':<13}{implementer_text}")
+    print(f"{'plan_detail:':<13}{plan_detail_text}")
     print(f"{'review:':<13}{review_text}")
     print(f"{'bypass:':<13}{bypass_text}")
     print()
@@ -360,6 +365,7 @@ def _stub_decision(risk: Risk) -> RoutingDecision:
         implementer="cursor",
         plan_required=False,
         plan_approval_required=False,
+        plan_detail="brief",
         review_required=False,
         evidence_required=False,
         bypass_allowed=True,
@@ -859,6 +865,97 @@ def _cmd_ci_checks(*, base: str) -> int:
     return code
 
 
+def _cmd_start(
+    *,
+    task_id: int,
+    risk_arg: str | None,
+    skip_review: bool,
+    review: str | None,
+    reason: str | None,
+    dry_run: bool,
+) -> int:
+    hint: Risk | None = None
+    if risk_arg:
+        try:
+            hint = Risk(risk_arg.strip().upper())
+        except ValueError:
+            print(f"invalid risk: {risk_arg}", file=sys.stderr)
+            return 2
+    try:
+        result = start(
+            repo_root(),
+            task_id,
+            risk_hint=hint,
+            skip_review=skip_review,
+            review_advisory=review == "advisory",
+            reason=reason,
+            dry_run=dry_run,
+        )
+    except (RunnerError, OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return _start_exit(result)
+
+
+def _cmd_approve(
+    *,
+    task_id: int,
+    risk_arg: str | None,
+    skip_review: bool,
+    review: str | None,
+    reason: str | None,
+) -> int:
+    hint: Risk | None = None
+    if risk_arg:
+        try:
+            hint = Risk(risk_arg.strip().upper())
+        except ValueError:
+            print(f"invalid risk: {risk_arg}", file=sys.stderr)
+            return 2
+    try:
+        result = approve(
+            repo_root(),
+            task_id,
+            risk_hint=hint,
+            skip_review=skip_review,
+            review_advisory=review == "advisory",
+            reason=reason,
+        )
+    except (RunnerError, OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return _start_exit(result)
+
+
+def _cmd_stop(*, task_id: int) -> int:
+    try:
+        stop(repo_root(), task_id)
+    except (RunnerError, OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_cancel(*, task_id: int, reason: str, discard: bool) -> int:
+    try:
+        cancel(repo_root(), task_id, reason=reason, discard=discard)
+    except (RunnerError, OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+def _start_exit(result: StartResult) -> int:
+    joined = "\n".join(result.messages)
+    if "already running" in joined or "stale lock" in joined:
+        return 1
+    if result.final_state is State.BLOCKED:
+        return 1
+    if result.verify_passed is False:
+        return 1
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -910,6 +1007,29 @@ def main() -> None:
     recover_flags.add_argument("--release", action="store_true")
     recover_flags.add_argument("--abandon", action="store_true")
 
+    start_parser = sub.add_parser("start")
+    start_parser.add_argument("task_id", type=int, metavar="id")
+    start_parser.add_argument("--risk", default=None)
+    start_parser.add_argument("--skip-review", action="store_true")
+    start_parser.add_argument("--review", choices=["advisory"], default=None)
+    start_parser.add_argument("--reason", default=None)
+    start_parser.add_argument("--dry-run", action="store_true")
+
+    approve_parser = sub.add_parser("approve")
+    approve_parser.add_argument("task_id", type=int, metavar="id")
+    approve_parser.add_argument("--risk", default=None)
+    approve_parser.add_argument("--skip-review", action="store_true")
+    approve_parser.add_argument("--review", choices=["advisory"], default=None)
+    approve_parser.add_argument("--reason", default=None)
+
+    stop_parser = sub.add_parser("stop")
+    stop_parser.add_argument("task_id", type=int, metavar="id")
+
+    cancel_parser = sub.add_parser("cancel")
+    cancel_parser.add_argument("task_id", type=int, metavar="id")
+    cancel_parser.add_argument("--reason", required=True)
+    cancel_parser.add_argument("--discard", action="store_true")
+
     args = parser.parse_args()
     if args.command == "init":
         raise SystemExit(_cmd_init(force=args.force))
@@ -939,6 +1059,37 @@ def main() -> None:
                 task_id=args.task_id,
                 release_lock=args.release,
                 abandon=args.abandon,
+            )
+        )
+    if args.command == "start":
+        raise SystemExit(
+            _cmd_start(
+                task_id=args.task_id,
+                risk_arg=args.risk,
+                skip_review=args.skip_review,
+                review=args.review,
+                reason=args.reason,
+                dry_run=args.dry_run,
+            )
+        )
+    if args.command == "approve":
+        raise SystemExit(
+            _cmd_approve(
+                task_id=args.task_id,
+                risk_arg=args.risk,
+                skip_review=args.skip_review,
+                review=args.review,
+                reason=args.reason,
+            )
+        )
+    if args.command == "stop":
+        raise SystemExit(_cmd_stop(task_id=args.task_id))
+    if args.command == "cancel":
+        raise SystemExit(
+            _cmd_cancel(
+                task_id=args.task_id,
+                reason=args.reason,
+                discard=args.discard,
             )
         )
     if args.command == "task":

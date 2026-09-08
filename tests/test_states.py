@@ -38,6 +38,13 @@ def _decision(
         implementer="codex" if complexity is Complexity.HIGH else "cursor",
         plan_required=risk is not Risk.LOW,
         plan_approval_required=risk is Risk.HIGH,
+        plan_detail=(
+            "none"
+            if complexity is Complexity.LOW
+            else "brief"
+            if complexity is Complexity.MEDIUM
+            else "formal"
+        ),
         review_required=review_required,
         evidence_required=risk is Risk.HIGH,
         bypass_allowed=True,
