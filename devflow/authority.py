@@ -48,6 +48,8 @@ CONTROL_PATHS: list[str] = [
     # (check_control_changes lives here). Consumer projects keep app code
     # under src/** and depend on devflow as a package.
     "devflow/**",
+    # The bundled template policy defines risk rules for new projects.
+    "templates/project/.ai/**",
 ]
 
 _ALLOWED_WITH_CONTROL: tuple[str, ...] = (
@@ -153,6 +155,20 @@ def check_control_changes(changed: list[str]) -> ControlChangeResult:
         ok=ok,
         message=message,
     )
+
+
+def is_control_change(changed: list[str]) -> bool:
+    """True when every path is a control file or an allowed companion."""
+    if not changed:
+        return False
+    for raw in changed:
+        path = _posix(raw)
+        if _matches_any(path, CONTROL_PATHS):
+            continue
+        if _matches_any(path, _ALLOWED_WITH_CONTROL):
+            continue
+        return False
+    return True
 
 
 def _posix(path: str) -> str:

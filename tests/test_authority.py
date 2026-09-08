@@ -12,6 +12,7 @@ from devflow.authority import (
     STRIP_ENV_KEYS,
     check_agent_output_for_violations,
     check_control_changes,
+    is_control_change,
     load_policy_from_base,
     sanitized_env,
 )
@@ -170,6 +171,42 @@ def test_no_control_files_ok() -> None:
     result = check_control_changes(["src/orders/service.py"])
     assert result.ok is True
     assert result.touches_control is False
+
+
+def test_template_policy_is_control() -> None:
+    result = check_control_changes(["templates/project/.ai/policy.yml"])
+    assert result.touches_control is True
+    assert result.ok is True
+
+
+def test_template_policy_with_devflow_ok() -> None:
+    result = check_control_changes(
+        ["templates/project/.ai/policy.yml", "devflow/policy.py"]
+    )
+    assert result.ok is True
+
+
+def test_template_policy_with_src_not_ok() -> None:
+    result = check_control_changes(
+        ["templates/project/.ai/policy.yml", "src/orders/service.py"]
+    )
+    assert result.ok is False
+
+
+def test_is_control_change_workflow_only() -> None:
+    assert is_control_change([".github/workflows/x.yml"]) is True
+
+
+def test_is_control_change_workflow_with_tests() -> None:
+    assert is_control_change([".github/workflows/x.yml", "tests/test_x.py"]) is True
+
+
+def test_is_control_change_src_is_false() -> None:
+    assert is_control_change(["src/orders/service.py"]) is False
+
+
+def test_is_control_change_empty_is_false() -> None:
+    assert is_control_change([]) is False
 
 
 def test_agent_output_flags_gh_pr_merge() -> None:

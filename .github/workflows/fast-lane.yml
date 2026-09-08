@@ -26,6 +26,7 @@ jobs:
           import sys
           from pathlib import Path
 
+          from devflow.authority import is_control_change
           from devflow.policy import fast_lane_eligible, load_policy
 
           base_ref = os.environ["BASE_REF"]
@@ -41,6 +42,9 @@ jobs:
           changed = [line.replace("\\", "/") for line in diff.stdout.splitlines() if line]
           if any(path.startswith(".devflow/tasks/") for path in changed):
               print("task file present — fast lane guard skipped")
+              sys.exit(0)
+          if is_control_change(changed):
+              print("control-path change — fast lane guard skipped")
               sys.exit(0)
           policy_path = Path(".ai/policy.yml")
           if not policy_path.is_file():
