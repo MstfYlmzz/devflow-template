@@ -16,6 +16,7 @@ from devflow.agents import (
     run,
 )
 from devflow.authority import load_policy_from_base
+from devflow.ci_checks import changed_files, ci_checks_report, needs_fast_lane
 from devflow.freshness import (
     check_code_freshness,
     check_decision_validity,
@@ -843,6 +844,21 @@ def _cmd_fast_lane_check(*, paths_arg: str) -> int:
     return 1
 
 
+def _cmd_ci_checks(*, base: str) -> int:
+    try:
+        root = repo_root()
+        changed = changed_files(root, base)
+        policy = {}
+        if needs_fast_lane(changed):
+            policy = load_policy(_policy_path())
+    except (OSError, ValueError, RuntimeError, FileNotFoundError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    code, text = ci_checks_report(changed, policy)
+    print(text, end="")
+    return code
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -863,6 +879,9 @@ def main() -> None:
 
     fast_parser = sub.add_parser("fast-lane-check")
     fast_parser.add_argument("--paths", required=True)
+
+    ci_parser = sub.add_parser("ci-checks")
+    ci_parser.add_argument("--base", default="origin/main")
 
     sub.add_parser("doctor")
     sub.add_parser("agent-check")
@@ -908,6 +927,8 @@ def main() -> None:
         raise SystemExit(_cmd_check_merge(risk_arg=args.risk, paths_arg=args.paths))
     if args.command == "fast-lane-check":
         raise SystemExit(_cmd_fast_lane_check(paths_arg=args.paths))
+    if args.command == "ci-checks":
+        raise SystemExit(_cmd_ci_checks(base=args.base))
     if args.command == "agent-check":
         raise SystemExit(_cmd_agent_check())
     if args.command == "agent-smoke":

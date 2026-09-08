@@ -16,7 +16,6 @@ from devflow.agents import (
     run_with_retry,
     terminate_tree,
 )
-from devflow.lock import is_process_alive
 
 
 def _cmd_string(args: list[str]) -> str:
@@ -335,6 +334,11 @@ def test_terminate_tree_kills_sleeping_process() -> None:
     )
     try:
         terminate_tree(proc.pid)
-        assert is_process_alive(proc.pid) is False
+        # POSIX keeps a killed child as a zombie until the parent wait()s;
+        # is_process_alive would still report it live. Lock checks call that
+        # helper on an unrelated pid, so they do not hit this parent/zombie
+        # case. Popen.returncode is the right signal for this test.
+        proc.wait(timeout=10)
+        assert proc.returncode is not None
     finally:
         proc.wait(timeout=5)

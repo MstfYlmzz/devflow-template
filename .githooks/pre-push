@@ -17,3 +17,17 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
 done
 
 ./scripts/verify
+
+if [[ -d "${ROOT}/.venv/Scripts" ]]; then
+  PATH="${ROOT}/.venv/Scripts:${PATH}"
+fi
+if [[ -d "${ROOT}/.venv/bin" ]]; then
+  PATH="${ROOT}/.venv/bin:${PATH}"
+fi
+export PATH
+
+if ! command -v devflow >/dev/null 2>&1; then
+  echo "warning: devflow is not installed; skipping ci-checks" >&2
+  exit 0
+fi
+devflow ci-checks

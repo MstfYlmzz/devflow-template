@@ -8,8 +8,9 @@ To mimic CI (no host git identity):
 HOME=$(mktemp -d) GIT_CONFIG_GLOBAL=/dev/null ./scripts/verify
 ```
 
-CI type-checks on Linux. Platform-specific APIs (for example `ctypes.windll`)
-are invisible to that mypy run even when they type-check on Windows.
+`scripts/verify.d/30-typecheck` runs `mypy --platform linux` so local typing
+matches CI. Platform-only APIs such as `ctypes.windll` are invisible to that
+run even when the host is Windows.
 
 ## Test levels
 
