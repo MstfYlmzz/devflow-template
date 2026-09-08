@@ -133,20 +133,22 @@ def _hhmm(started_at: str) -> str:
 
 
 def _windows_pid_alive(pid: int) -> bool:
+    if sys.platform != "win32":
+        return False
     import ctypes
 
+    # Linux mypy has no ctypes.windll; Windows mypy does, so unused-ignore too.
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined, unused-ignore]
     process_query_limited_information = 0x1000
     still_active = 259
-    handle = ctypes.windll.kernel32.OpenProcess(
-        process_query_limited_information, False, pid
-    )
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
     if not handle:
         return False
     try:
         code = ctypes.c_ulong()
-        ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
         if ok == 0:
             return False
         return int(code.value) == still_active
     finally:
-        ctypes.windll.kernel32.CloseHandle(handle)
+        kernel32.CloseHandle(handle)

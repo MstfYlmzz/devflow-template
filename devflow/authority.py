@@ -55,6 +55,9 @@ CONTROL_PATHS: list[str] = [
     # and similar paths; no such directory exists here. The rule does its
     # real work in consumer projects.
     "templates/project/**",
+    # .gitignore is part of the control mechanism: it keeps lock files,
+    # worktrees, and local config unversioned. Removing a line can leak secrets.
+    ".gitignore",
 ]
 
 _ALLOWED_WITH_CONTROL: tuple[str, ...] = (
