@@ -1,0 +1,32 @@
+# Bu dosya devflow-template reposunun KENDİ policy'sidir.
+# templates/project/.ai/policy.yml ile aynı değildir ve olmamalıdır:
+# bu repoda uygulama kodu yok, devflow kaynağı kontrol mekanizmasının parçası.
+reviewed_for_this_project: true
+
+floor:
+  - paths: ["devflow/**", ".ai/**", "scripts/**", ".githooks/**", ".github/**"]
+    risk: HIGH
+
+  - paths: ["templates/project/**"]
+    risk: MEDIUM
+
+  - paths: ["**/*.md", "README*"]
+    risk: LOW
+    fast_lane: true
+
+  - paths: ["docs/adr/**", "docs/requirements/**"]
+    risk: LOW
+
+signal_floor:
+  transaction_change: HIGH
+  concurrency_sensitive: HIGH
+  architecture_boundary_change: HIGH
+  unfamiliar_area: MEDIUM
+
+routing:
+  complexity:
+    LOW: cursor
+    MEDIUM: cursor
+    HIGH: codex
+  review_max_cycles: 2
+  agent_timeout_minutes: 20
