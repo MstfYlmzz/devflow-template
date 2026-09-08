@@ -25,9 +25,9 @@ signal_floor:
 
 routing:
   complexity:
-    LOW: cursor
-    MEDIUM: cursor
-    HIGH: codex
+    LOW: claude
+    MEDIUM: claude
+    HIGH: claude
   risk:
     LOW:    {plan_approval: false, review: false, evidence: false}
     MEDIUM: {plan_approval: false, review: true,  evidence: false}
