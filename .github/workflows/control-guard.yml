@@ -19,31 +19,4 @@ jobs:
       - name: Check control-file isolation
         env:
           BASE_REF: origin/${{ github.base_ref }}
-        run: |
-          python <<'PY'
-          import os
-          import subprocess
-          import sys
-
-          from devflow.authority import check_control_changes
-
-          base_ref = os.environ["BASE_REF"]
-          diff = subprocess.run(
-              ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
-              capture_output=True,
-              text=True,
-              check=False,
-          )
-          if diff.returncode != 0:
-              print(diff.stderr or diff.stdout, file=sys.stderr)
-              sys.exit(1)
-          changed = [line for line in diff.stdout.splitlines() if line]
-          result = check_control_changes(changed)
-          print(f"checked {len(changed)} changed file(s)")
-          if result.touches_control:
-              print("control:", ", ".join(result.control_files))
-          if not result.ok:
-              print(result.message, file=sys.stderr)
-              sys.exit(1)
-          print("control-guard: ok")
-          PY
+        run: devflow ci-checks --base "${BASE_REF}"

@@ -39,6 +39,8 @@ def test_init_creates_expected_files(git_repo: Path) -> None:
     assert (git_repo / ".ai").is_dir()
     assert (git_repo / ".devflow/tasks").is_dir()
     assert not (git_repo / "docs/architecture/.gitkeep").exists()
+    gitignore = (git_repo / ".gitignore").read_text(encoding="utf-8")
+    assert ".devflow/locks/" in gitignore
 
 
 def test_init_requires_git_repo(tmp_path: Path) -> None:
@@ -53,6 +55,15 @@ def test_init_skips_existing_file(git_repo: Path) -> None:
     assert existing.read_text(encoding="utf-8") == "keep me\n"
     assert existing in report.skipped
     assert existing not in report.created
+
+
+def test_init_appends_locks_gitignore(git_repo: Path) -> None:
+    existing = git_repo / ".gitignore"
+    existing.write_text("*.pyc\n", encoding="utf-8")
+    init(git_repo)
+    text = existing.read_text(encoding="utf-8")
+    assert "*.pyc" in text
+    assert ".devflow/locks/" in text
 
 
 def test_init_does_not_copy_language_stages(git_repo: Path) -> None:

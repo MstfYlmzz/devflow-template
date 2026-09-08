@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeVar
@@ -68,6 +70,7 @@ class TaskFrontmatter:
     floor_risk_actual: Risk | None
     floor_matched_actual: list[str]
     blocked_from: str | None
+    blocked_reason: str | None
     review_records: list[ReviewRecord]
 
 
@@ -172,6 +175,7 @@ def create(
     floor_risk_actual: Risk | None = None,
     floor_matched_actual: list[str] | None = None,
     blocked_from: str | None = None,
+    blocked_reason: str | None = None,
     review_records: list[ReviewRecord] | None = None,
     body: str = "",
 ) -> TaskFile:
@@ -196,6 +200,7 @@ def create(
         floor_risk_actual=floor_risk_actual,
         floor_matched_actual=_redact_str_list(floor_matched_actual or []),
         blocked_from=redact(blocked_from) if blocked_from is not None else None,
+        blocked_reason=redact(blocked_reason) if blocked_reason is not None else None,
         review_records=list(review_records or []),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,6 +314,7 @@ def _parse_frontmatter(data: dict[str, object]) -> TaskFrontmatter:
             data.get("floor_matched_actual"), "floor_matched_actual"
         ),
         blocked_from=_opt_str(data.get("blocked_from")),
+        blocked_reason=_opt_str(data.get("blocked_reason")),
         review_records=_parse_review_records(data.get("review_records")),
     )
 
@@ -441,6 +447,26 @@ def _frontmatter_dict(fm: TaskFrontmatter) -> dict[str, object]:
     return data
 
 
+def atomic_write(path: Path, content: str) -> None:
+    """Write content via a temp file, fsync, then replace the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    tmp = Path(raw)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _write(path: Path, fm: TaskFrontmatter, body: str) -> None:
     dumped = yaml.safe_dump(
         _frontmatter_dict(fm),
@@ -448,8 +474,7 @@ def _write(path: Path, fm: TaskFrontmatter, body: str) -> None:
         allow_unicode=True,
         default_flow_style=False,
     )
-    text = f"---\n{dumped}---\n{body}"
-    path.write_text(text, encoding="utf-8")
+    atomic_write(path, f"---\n{dumped}---\n{body}")
 
 
 def _redact_str_list(values: list[str]) -> list[str]:

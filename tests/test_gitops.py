@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from devflow.gitops import rebase_onto_base
+from devflow.gitops import inspect_resume, rebase_onto_base
 from tests.conftest import git
 
 
@@ -45,3 +45,46 @@ def test_rebase_onto_base_is_not_called_elsewhere() -> None:
             continue
         text = path.read_text(encoding="utf-8")
         assert "rebase_onto_base" not in text
+
+
+def test_inspect_resume_missing_worktree(git_repo: Path) -> None:
+    ctx = inspect_resume(184, git_repo)
+    assert ctx.worktree_exists is False
+    assert ctx.branch_exists is False
+    assert ctx.uncommitted_files == []
+    assert ctx.last_commit_sha is None
+
+
+def test_inspect_resume_uncommitted_files(git_repo: Path) -> None:
+    (git_repo / "README").write_text("base\n", encoding="utf-8")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-m", "base")
+    worktree = git_repo / ".devflow" / "worktrees" / "task-184"
+    git(
+        git_repo,
+        "worktree",
+        "add",
+        "-b",
+        "task/184-order-cancel",
+        str(worktree),
+    )
+    (worktree / "dirty.txt").write_text("n\n", encoding="utf-8")
+    ctx = inspect_resume(184, git_repo)
+    assert ctx.worktree_exists is True
+    assert ctx.branch_exists is True
+    assert "dirty.txt" in ctx.uncommitted_files
+    assert ctx.last_commit_sha is not None
+
+
+def test_inspect_resume_plain_directory_ignores_parent_repo(git_repo: Path) -> None:
+    (git_repo / "README").write_text("base\n", encoding="utf-8")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-m", "base")
+    (git_repo / "parent-only.py").write_text("x\n", encoding="utf-8")
+    worktree = git_repo / ".devflow" / "worktrees" / "task-184"
+    worktree.mkdir(parents=True)
+    (worktree / "note.txt").write_text("n\n", encoding="utf-8")
+    ctx = inspect_resume(184, git_repo)
+    assert ctx.worktree_exists is True
+    assert ctx.uncommitted_files == []
+    assert ctx.last_commit_sha is None

@@ -14,6 +14,7 @@ from devflow.agents import (
     _build_command,
     run,
     run_with_retry,
+    terminate_tree,
 )
 
 
@@ -325,3 +326,19 @@ def test_dangerously_skip_permissions_absent() -> None:
         if needle in text:
             hits.append(path.as_posix())
     assert hits == []
+
+
+def test_terminate_tree_kills_sleeping_process() -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    try:
+        terminate_tree(proc.pid)
+        # POSIX keeps a killed child as a zombie until the parent wait()s;
+        # is_process_alive would still report it live. Lock checks call that
+        # helper on an unrelated pid, so they do not hit this parent/zombie
+        # case. Popen.returncode is the right signal for this test.
+        proc.wait(timeout=10)
+        assert proc.returncode is not None
+    finally:
+        proc.wait(timeout=5)

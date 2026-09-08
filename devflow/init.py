@@ -4,6 +4,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from devflow.lock import LOCKS_GITIGNORE_LINE, ignores_lock_dir
+
 _EXTRA_RELATIVE: tuple[str, ...] = (
     "scripts/verify",
     "scripts/verify.d/00-preflight",
@@ -81,4 +83,18 @@ def init(target: Path, force: bool = False) -> InitReport:
         dest = target / extra
         _copy_file(src, dest, report)
 
+    _ensure_locks_gitignore(target, report)
     return report
+
+
+def _ensure_locks_gitignore(target: Path, report: InitReport) -> None:
+    path = target / ".gitignore"
+    if path.is_file():
+        text = path.read_text(encoding="utf-8")
+        if ignores_lock_dir(text):
+            return
+        suffix = "" if not text or text.endswith("\n") else "\n"
+        path.write_text(f"{text}{suffix}{LOCKS_GITIGNORE_LINE}\n", encoding="utf-8")
+        return
+    path.write_text(f"{LOCKS_GITIGNORE_LINE}\n", encoding="utf-8")
+    report.created.append(path)

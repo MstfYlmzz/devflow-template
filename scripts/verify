@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Mimic CI git identity and platform typing: see docs/testing/strategy.md
 set -euo pipefail
 
 if [[ $# -ne 0 ]]; then

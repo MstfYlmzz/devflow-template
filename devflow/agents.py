@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import os
 import shlex
+import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from devflow.authority import sanitized_env
+from devflow.lock import is_process_alive
 
 COMMANDS: dict[str, str] = {
     "cursor": "DEVFLOW_CURSOR_CMD",
@@ -105,6 +107,105 @@ def _build_command(
     return [*argv, *_mode_flags(agent, mode, prompt)]
 
 
+def terminate_tree(pid: int, grace_seconds: float = 5) -> None:
+    """Terminate a process and its descendants. SIGTERM/taskkill, then force."""
+    if not is_process_alive(pid):
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if _wait_until_dead(pid, grace_seconds):
+            return
+        subprocess.run(
+            ["taskkill", "/F", "/PID", str(pid), "/T"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _wait_until_dead(pid, 1)
+        return
+    pids = [pid, *_descendant_pids(pid)]
+    for child in pids:
+        try:
+            os.kill(child, signal.SIGTERM)
+        except OSError:
+            pass
+    if _wait_until_dead(pid, grace_seconds):
+        return
+    pids = [pid, *_descendant_pids(pid)]
+    sigkill = getattr(signal, "SIGKILL", 9)
+    for child in pids:
+        try:
+            os.kill(child, sigkill)
+        except OSError:
+            pass
+    _wait_until_dead(pid, 1)
+
+
+def _wait_until_dead(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not is_process_alive(pid):
+            return True
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    return not is_process_alive(pid)
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    found: list[int] = []
+    for child in _child_pids(pid):
+        found.append(child)
+        found.extend(_descendant_pids(child))
+    return found
+
+
+def _child_pids(pid: int) -> list[int]:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _proc_children(pid)
+    if result.returncode != 0:
+        return _proc_children(pid)
+    return [int(item) for item in result.stdout.split() if item.isdigit()]
+
+
+def _proc_children(pid: int) -> list[int]:
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return []
+    children: list[int] = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        stat_path = entry / "stat"
+        try:
+            text = stat_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        close = text.rfind(")")
+        if close == -1:
+            continue
+        fields = text[close + 1 :].split()
+        if len(fields) < 2:
+            continue
+        try:
+            ppid = int(fields[1])
+        except ValueError:
+            continue
+        if ppid == pid:
+            children.append(int(entry.name))
+    return children
+
+
 def classify_failure(exit_code: int, stderr: str) -> tuple[AgentStatus, str]:
     _ = exit_code
     lowered = stderr.casefold()
@@ -141,40 +242,49 @@ def run(
         )
 
     timeout_seconds = timeout_minutes * 60
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-            env=sanitized_env(),
+    popen_kwargs: dict[str, object] = {
+        "cwd": worktree,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": sanitized_env(),
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        if isinstance(exc.stdout, bytes):
-            stdout = exc.stdout.decode("utf-8", errors="replace")
-        if isinstance(exc.stderr, bytes):
-            stderr = exc.stderr.decode("utf-8", errors="replace")
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(argv, **popen_kwargs)  # type: ignore[call-overload]
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        terminate_tree(proc.pid)
+        try:
+            stdout, stderr = proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        if is_process_alive(proc.pid):
+            term_detail = "timeout; process tree still running after terminate"
+        else:
+            term_detail = "timeout; process tree terminated"
         return AgentResult(
             status=AgentStatus.BLOCKED,
             output=f"{stdout}{stderr}",
-            detail="timeout",
+            detail=term_detail,
             duration_seconds=time.monotonic() - started,
         )
 
-    output = f"{completed.stdout}{completed.stderr}"
+    output = f"{stdout}{stderr}"
     duration = time.monotonic() - started
-    if completed.returncode == 0:
+    if proc.returncode == 0:
         return AgentResult(
             status=AgentStatus.OK,
             output=output,
             detail=None,
             duration_seconds=duration,
         )
-    status, detail = classify_failure(completed.returncode, completed.stderr)
+    status, detail = classify_failure(proc.returncode or 1, stderr)
     return AgentResult(
         status=status,
         output=output,
