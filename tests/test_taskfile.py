@@ -16,6 +16,7 @@ from devflow.taskfile import (
     create,
     decision_inputs,
     estimate_paths,
+    format_estimated_floor_matches,
     read,
     read_doc_impact,
     update_frontmatter,
@@ -313,6 +314,8 @@ def test_estimate_paths_authority_matches_devflow_floor(tmp_path: Path) -> None:
     floor = apply_floor(paths, [], policy)
     assert floor.risk_floor is Risk.HIGH
     assert any("devflow/**" in item for item in floor.matched_rules)
+    recorded = format_estimated_floor_matches(floor.matched_rules, tf)
+    assert recorded == ["devflow/** (from module: authority)"]
 
 
 def test_estimate_paths_empty_when_no_modules_or_issue_paths(tmp_path: Path) -> None:

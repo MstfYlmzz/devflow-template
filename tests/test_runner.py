@@ -14,7 +14,7 @@ from devflow.lock import acquire, lock_path, read_lock
 from devflow.policy import Complexity, Risk
 from devflow.runner import RunnerError, approve, cancel, start, stop
 from devflow.states import State
-from devflow.taskfile import append_section, create, read
+from devflow.taskfile import append_section, body_sections, create, read
 from tests.conftest import git
 
 _TEMPLATES = Path(__file__).resolve().parents[1] / "templates" / "project"
@@ -82,6 +82,7 @@ def _ok_agent(task_path: Path, review_yaml: str | None = None):
         on_spawn = kwargs.get("on_spawn")
         if callable(on_spawn):
             on_spawn(os.getpid())
+        prompt = prompt_file.read_text(encoding="utf-8")
         if mode is AgentMode.EDIT:
             (worktree / "src" / "app.py").write_text(
                 "print('done')\n", encoding="utf-8"
@@ -93,6 +94,8 @@ def _ok_agent(task_path: Path, review_yaml: str | None = None):
         if mode is AgentMode.REVIEW:
             output = review_yaml or "[]"
             return AgentResult(AgentStatus.OK, output, None, 0.8)
+        if "plan_only: true" in prompt:
+            return AgentResult(AgentStatus.OK, "- do the work\n", None, 0.3)
         return AgentResult(
             AgentStatus.OK,
             (
@@ -200,19 +203,57 @@ def test_skip_review_without_reason_errors(project: Path) -> None:
         start(project, 184, skip_review=True)
 
 
-def test_high_epic_stops_at_plan_approval(project: Path) -> None:
-    _task(
+def test_high_epic_stops_at_plan_approval(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(
         project,
         risk_proposed=Risk.HIGH,
         complexity_proposed=Complexity.MEDIUM,
         modules=["src/app.py"],
     )
+    modes: list[AgentMode] = []
+
+    def run(
+        agent: str,
+        prompt_file: Path,
+        worktree: Path,
+        mode: AgentMode,
+        **kwargs: object,
+    ) -> AgentResult:
+        modes.append(mode)
+        return _ok_agent(path)(agent, prompt_file, worktree, mode, **kwargs)
+
+    monkeypatch.setattr("devflow.agents.run", run)
     result = start(project, 184)
     assert result.final_state is State.PLAN_APPROVAL
     tf = read(project / ".devflow" / "tasks" / "184.md")
     assert tf.frontmatter.state == "PLAN_APPROVAL"
-    assert result.worktree is None
+    assert result.worktree is not None
+    assert result.worktree.is_dir()
+    assert modes == [AgentMode.READ_ONLY]
+    assert AgentMode.EDIT not in modes
+    assert "Plan" in body_sections(tf)
+    assert "- do the work" in tf.body
     assert any("devflow approve 184" in item for item in result.messages)
+
+
+def test_start_records_floor_from_module(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(
+        project,
+        risk_proposed=Risk.MEDIUM,
+        complexity_proposed=Complexity.MEDIUM,
+        modules=["auth"],
+    )
+    monkeypatch.setattr("devflow.agents.run", _ok_agent(path))
+    start(project, 184)
+    tf = read(path)
+    assert tf.frontmatter.floor_risk is Risk.HIGH
+    assert tf.frontmatter.floor_matched
+    assert any("from module: auth" in item for item in tf.frontmatter.floor_matched)
+    assert all(" (path: " not in item for item in tf.frontmatter.floor_matched)
 
 
 def test_no_epic_runs_triage(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -458,7 +499,76 @@ def test_approve_continues_from_plan_approval(
         complexity_proposed=Complexity.MEDIUM,
         modules=["src/app.py"],
     )
+    append_section(path, "Plan", "- do X\n")
     monkeypatch.setattr("devflow.agents.run", _ok_agent(path))
     result = approve(project, 184, skip_review=True, reason="ship it")
     assert result.final_state is not State.PLAN_APPROVAL
     assert result.worktree is not None
+
+
+def test_approve_without_plan_errors(project: Path) -> None:
+    _task(
+        project,
+        state="PLAN_APPROVAL",
+        risk_proposed=Risk.HIGH,
+        complexity_proposed=Complexity.MEDIUM,
+        modules=["src/app.py"],
+    )
+    with pytest.raises(RunnerError, match="task 184 has no plan to approve"):
+        approve(project, 184, skip_review=True, reason="ship it")
+
+
+def test_medium_writes_plan_then_implements(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(project, **_epic())
+    modes: list[AgentMode] = []
+
+    def run(
+        agent: str,
+        prompt_file: Path,
+        worktree: Path,
+        mode: AgentMode,
+        **kwargs: object,
+    ) -> AgentResult:
+        modes.append(mode)
+        return _ok_agent(path)(agent, prompt_file, worktree, mode, **kwargs)
+
+    monkeypatch.setattr("devflow.agents.run", run)
+    result = start(project, 184)
+    assert result.final_state is not State.PLAN_APPROVAL
+    assert AgentMode.READ_ONLY in modes
+    assert AgentMode.EDIT in modes
+    assert modes.index(AgentMode.READ_ONLY) < modes.index(AgentMode.EDIT)
+    tf = read(path)
+    assert "Plan" in body_sections(tf)
+    assert "- do the work" in tf.body
+
+
+def test_low_skips_plan_generation(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(
+        project,
+        risk_proposed=Risk.LOW,
+        complexity_proposed=Complexity.LOW,
+        modules=["src/app.py"],
+    )
+    modes: list[AgentMode] = []
+
+    def run(
+        agent: str,
+        prompt_file: Path,
+        worktree: Path,
+        mode: AgentMode,
+        **kwargs: object,
+    ) -> AgentResult:
+        modes.append(mode)
+        return _ok_agent(path)(agent, prompt_file, worktree, mode, **kwargs)
+
+    monkeypatch.setattr("devflow.agents.run", run)
+    start(project, 184)
+    assert AgentMode.READ_ONLY not in modes
+    assert AgentMode.EDIT in modes
+    tf = read(path)
+    assert "Plan" not in body_sections(tf)

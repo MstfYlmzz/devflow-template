@@ -59,6 +59,32 @@ def test_implementer_prompt_includes_body_and_plan_detail(tmp_path: Path) -> Non
     assert "# Implementer" in text
 
 
+def test_implementer_plan_only_asks_for_plan_not_code(tmp_path: Path) -> None:
+    _role(tmp_path, "implementer", "# Implementer\n")
+    tf = read(_task(tmp_path))
+    brief = build_prompt(
+        "implementer",
+        tf,
+        tmp_path,
+        {"plan_detail": "brief"},
+        plan_only=True,
+    )
+    assert "plan_only: true" in brief
+    assert "Write only a plan" in brief
+    assert "Do not change any code" in brief
+    assert "short bullet list" in brief
+    formal = build_prompt(
+        "implementer",
+        tf,
+        tmp_path,
+        {"plan_detail": "formal"},
+        plan_only=True,
+    )
+    assert "file list" in formal
+    assert "architectural impact" in formal
+    assert "test approach" in formal
+
+
 def test_missing_role_file_raises(tmp_path: Path) -> None:
     tf = read(_task(tmp_path))
     with pytest.raises(FileNotFoundError):
