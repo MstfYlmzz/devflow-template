@@ -48,8 +48,13 @@ CONTROL_PATHS: list[str] = [
     # (check_control_changes lives here). Consumer projects keep app code
     # under src/** and depend on devflow as a package.
     "devflow/**",
-    # The bundled template policy defines risk rules for new projects.
-    "templates/project/.ai/**",
+    # Everything under templates/project/ defines the consumer project's
+    # control mechanism: policy, role prompts, document skeleton, and the
+    # verify contract. None of it is application code.
+    # In this repo, "unrelated application code" is practically only src/**
+    # and similar paths; no such directory exists here. The rule does its
+    # real work in consumer projects.
+    "templates/project/**",
 ]
 
 _ALLOWED_WITH_CONTROL: tuple[str, ...] = (

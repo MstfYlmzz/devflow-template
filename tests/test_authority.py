@@ -160,12 +160,30 @@ def test_template_policy_with_src_not_ok() -> None:
     assert result.ok is False
 
 
+def test_template_docs_with_devflow_ok() -> None:
+    result = check_control_changes(
+        ["templates/project/docs/testing/strategy.md", "devflow/cli.py"]
+    )
+    assert result.ok is True
+    assert result.touches_control is True
+
+
+def test_template_agents_md_alone_is_control() -> None:
+    result = check_control_changes(["templates/project/AGENTS.md"])
+    assert result.touches_control is True
+    assert result.ok is True
+
+
 def test_is_control_change_workflow_only() -> None:
     assert is_control_change([".github/workflows/x.yml"]) is True
 
 
 def test_is_control_change_workflow_with_tests() -> None:
     assert is_control_change([".github/workflows/x.yml", "tests/test_x.py"]) is True
+
+
+def test_is_control_change_template_docs_is_true() -> None:
+    assert is_control_change(["templates/project/docs/testing/strategy.md"]) is True
 
 
 def test_is_control_change_src_is_false() -> None:
@@ -189,3 +207,5 @@ def test_agent_output_clean_for_normal_code() -> None:
 def test_control_paths_include_github_workflows() -> None:
     assert ".github/workflows/**" in CONTROL_PATHS
     assert "devflow/**" in CONTROL_PATHS
+    assert "templates/project/**" in CONTROL_PATHS
+    assert "templates/project/.ai/**" not in CONTROL_PATHS
