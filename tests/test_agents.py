@@ -14,7 +14,9 @@ from devflow.agents import (
     _build_command,
     run,
     run_with_retry,
+    terminate_tree,
 )
+from devflow.lock import is_process_alive
 
 
 def _cmd_string(args: list[str]) -> str:
@@ -325,3 +327,14 @@ def test_dangerously_skip_permissions_absent() -> None:
         if needle in text:
             hits.append(path.as_posix())
     assert hits == []
+
+
+def test_terminate_tree_kills_sleeping_process() -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    try:
+        terminate_tree(proc.pid)
+        assert is_process_alive(proc.pid) is False
+    finally:
+        proc.wait(timeout=5)

@@ -43,6 +43,9 @@ coverage.xml
 *.cover
 .hypothesis/
 
+# Devflow run locks (machine-local)
+.devflow/locks/
+
 # Environment / IDE
 .env
 .env.*

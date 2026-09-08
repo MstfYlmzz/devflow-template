@@ -73,3 +73,17 @@ def test_doctor_exit_one_when_policy_missing(
     (git_repo / ".ai" / "policy.yml").unlink()
     assert doctor(git_repo) == 1
     assert "missing file: .ai/policy.yml" in capsys.readouterr().out
+
+
+def test_doctor_warns_when_locks_not_gitignored(
+    git_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    init(git_repo)
+    _add_language_stage(git_repo)
+    _set_hooks_path(git_repo)
+    _mark_policy_reviewed(git_repo)
+    (git_repo / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    assert doctor(git_repo) == 0
+    output = capsys.readouterr().out
+    assert "warn:" in output
+    assert ".devflow/locks/" in output

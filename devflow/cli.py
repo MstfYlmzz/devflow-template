@@ -22,8 +22,21 @@ from devflow.freshness import (
     decision_validity_blockers,
     latest_review_record,
 )
-from devflow.gitops import git_output
+from devflow.gitops import (
+    git_output,
+    inspect_resume,
+    remove_task_worktree,
+    task_branch_name,
+    task_worktree,
+)
 from devflow.init import expected_relative_paths, init
+from devflow.lock import (
+    LOCKS_GITIGNORE_LINE,
+    ignores_lock_dir,
+    is_process_alive,
+    read_lock,
+    release,
+)
 from devflow.paths import repo_root, task_file
 from devflow.policy import (
     ArchitectureImpact,
@@ -196,6 +209,12 @@ def doctor(root: Path) -> int:
         emit("warn", "core.hooksPath not set — run ./scripts/setup-hooks")
     else:
         emit("ok", f"core.hooksPath is {hooks}")
+
+    gitignore = root / ".gitignore"
+    if gitignore.is_file() and ignores_lock_dir(gitignore.read_text(encoding="utf-8")):
+        emit("ok", f"{LOCKS_GITIGNORE_LINE} is gitignored")
+    else:
+        emit("warn", f".gitignore does not ignore {LOCKS_GITIGNORE_LINE}")
 
     todo_comments, todo_files = _todo_counts(root)
     if todo_comments:
@@ -705,6 +724,111 @@ def _cmd_task_freshness(*, task_id: int) -> int:
     return 1
 
 
+def _lock_clock(started_at: str) -> str:
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(started_at).strftime("%H:%M")
+    except ValueError:
+        return started_at
+
+
+def _cmd_recover(*, task_id: int, release_lock: bool, abandon: bool) -> int:
+    try:
+        root = repo_root()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    path = task_file(task_id)
+    if not path.is_file():
+        print(f"task file not found: {path}", file=sys.stderr)
+        return 1
+    try:
+        tf = read(path)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    lock = read_lock(task_id, root)
+    resume = inspect_resume(task_id, root)
+    worktree = task_worktree(root, task_id)
+    rel_worktree = worktree.resolve().relative_to(root.resolve()).as_posix()
+    if resume.worktree_exists:
+        n = len(resume.uncommitted_files)
+        worktree_text = f"{rel_worktree} (exists, {n} uncommitted files)"
+    else:
+        worktree_text = f"{rel_worktree} (missing)"
+    branch = task_branch_name(root, task_id)
+    branch_text = f"{branch} (exists)" if branch else "(none)"
+
+    if lock is None:
+        header = f"task {task_id} — no lock"
+        lock_lines: list[str] = []
+    elif is_process_alive(lock.pid):
+        header = f"task {task_id} — lock held"
+        lock_lines = [
+            f"  pid {lock.pid} (running), stage: {lock.stage}, "
+            f"started {_lock_clock(lock.started_at)}"
+        ]
+    else:
+        header = f"task {task_id} — stale lock detected"
+        lock_lines = [
+            f"  pid {lock.pid} (not running), stage: {lock.stage}, "
+            f"started {_lock_clock(lock.started_at)}"
+        ]
+
+    if not release_lock and not abandon:
+        print(header)
+        for line in lock_lines:
+            print(line)
+        print()
+        print(f"state:     {tf.frontmatter.state}")
+        print(f"worktree:  {worktree_text}")
+        print(f"branch:    {branch_text}")
+        print("last agent run: no result recorded")
+        print()
+        print("the work is preserved. options:")
+        print(
+            f"  devflow recover {task_id} --release   "
+            "release lock, keep work, set BLOCKED"
+        )
+        print(
+            f"  devflow recover {task_id} --abandon   "
+            "release lock, remove worktree, set CANCELLED"
+        )
+        return 0
+
+    if lock is not None and is_process_alive(lock.pid):
+        print(
+            f"task {task_id} is already running (pid {lock.pid})",
+            file=sys.stderr,
+        )
+        return 1
+
+    if release_lock:
+        release(task_id, root)
+        from_state = tf.frontmatter.state
+        update_frontmatter(
+            path,
+            state=State.BLOCKED.value,
+            blocked_from=from_state,
+            blocked_reason="INTERRUPTED",
+        )
+        append_section(
+            path,
+            "Recovery",
+            "INTERRUPTED — stale lock released, work preserved",
+        )
+        print(f"task {task_id}: lock released, state BLOCKED, worktree kept")
+        return 0
+
+    release(task_id, root)
+    remove_task_worktree(root, task_id)
+    update_frontmatter(path, state=State.CANCELLED.value)
+    print(f"task {task_id}: lock released, worktree removed, state CANCELLED")
+    return 0
+
+
 def _cmd_fast_lane_check(*, paths_arg: str) -> int:
     try:
         policy = load_policy(_policy_path())
@@ -761,6 +885,12 @@ def main() -> None:
     freshness_parser = task_sub.add_parser("freshness")
     freshness_parser.add_argument("task_id", type=int, metavar="id")
 
+    recover_parser = sub.add_parser("recover")
+    recover_parser.add_argument("task_id", type=int, metavar="id")
+    recover_flags = recover_parser.add_mutually_exclusive_group()
+    recover_flags.add_argument("--release", action="store_true")
+    recover_flags.add_argument("--abandon", action="store_true")
+
     args = parser.parse_args()
     if args.command == "init":
         raise SystemExit(_cmd_init(force=args.force))
@@ -782,6 +912,14 @@ def main() -> None:
         raise SystemExit(_cmd_agent_check())
     if args.command == "agent-smoke":
         raise SystemExit(_cmd_agent_smoke(agent=args.agent))
+    if args.command == "recover":
+        raise SystemExit(
+            _cmd_recover(
+                task_id=args.task_id,
+                release_lock=args.release,
+                abandon=args.abandon,
+            )
+        )
     if args.command == "task":
         if args.task_command == "show":
             raise SystemExit(_cmd_task_show(task_id=args.task_id))

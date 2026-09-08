@@ -19,6 +19,9 @@ from devflow.taskfile import TaskFile, body_sections, read_doc_impact
 _REVIEW_ROUND_RE = re.compile(r"^Review — round \d+$")
 _REVIEW_CYCLE_LIMIT = 2
 
+# BLOCKED reasons stored on TaskFrontmatter.blocked_reason (not triggers):
+# INTERRUPTED — the run stopped mid-flight and left a stale lock.
+
 
 class State(enum.Enum):
     BACKLOG = "BACKLOG"

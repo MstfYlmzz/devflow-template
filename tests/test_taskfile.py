@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from devflow.policy import Complexity, Risk, TriageSignals
 from devflow.taskfile import (
     TaskFrontmatter,
     append_section,
+    atomic_write,
     body_sections,
     create,
     decision_inputs,
@@ -176,6 +178,7 @@ def test_task_frontmatter_has_no_result_fields() -> None:
     forbidden = {"risk", "complexity", "implementer", "review_required"}
     assert names.isdisjoint(forbidden)
     assert "review_records" in names
+    assert "blocked_reason" in names
 
 
 def test_review_records_roundtrip_does_not_redact_sha(tmp_path: Path) -> None:
@@ -265,3 +268,24 @@ def test_decision_inputs_without_epic_proposal(tmp_path: Path) -> None:
     tf = create(path, 2, "standalone")
     epic, *_ = decision_inputs(tf)
     assert epic is None
+
+
+def test_atomic_write_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "file.txt"
+    atomic_write(path, "hello\n")
+    assert path.read_text(encoding="utf-8") == "hello\n"
+
+
+def test_atomic_write_keeps_original_on_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "file.txt"
+    path.write_text("original\n", encoding="utf-8")
+
+    def boom(_fd: int) -> None:
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(os, "fsync", boom)
+    with pytest.raises(OSError, match="fsync failed"):
+        atomic_write(path, "new content\n")
+    assert path.read_text(encoding="utf-8") == "original\n"
