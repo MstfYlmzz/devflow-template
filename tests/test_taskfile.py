@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from devflow.freshness import ReviewRecord
-from devflow.policy import Complexity, Risk, TriageSignals
+from devflow.policy import Complexity, Risk, TriageSignals, apply_floor, load_policy
 from devflow.taskfile import (
     TaskFrontmatter,
     append_section,
@@ -15,10 +15,13 @@ from devflow.taskfile import (
     body_sections,
     create,
     decision_inputs,
+    estimate_paths,
     read,
     read_doc_impact,
     update_frontmatter,
 )
+
+_REPO_POLICY = Path(__file__).resolve().parents[1] / ".ai" / "policy.yml"
 
 
 def _path(tmp_path: Path, name: str = "1.md") -> Path:
@@ -289,3 +292,40 @@ def test_atomic_write_keeps_original_on_error(
     with pytest.raises(OSError, match="fsync failed"):
         atomic_write(path, "new content\n")
     assert path.read_text(encoding="utf-8") == "original\n"
+
+
+def test_estimate_paths_authority_matches_devflow_floor(tmp_path: Path) -> None:
+    policy = load_policy(_REPO_POLICY)
+    tf = create(
+        _path(tmp_path),
+        1,
+        "coverage",
+        modules=["authority"],
+        body="no file paths here\n",
+    )
+    paths = estimate_paths(tf)
+    assert paths == [
+        "devflow/authority.py",
+        "src/authority/**",
+        "**/authority/**",
+        "**/*authority*",
+    ]
+    floor = apply_floor(paths, [], policy)
+    assert floor.risk_floor is Risk.HIGH
+    assert any("devflow/**" in item for item in floor.matched_rules)
+
+
+def test_estimate_paths_empty_when_no_modules_or_issue_paths(tmp_path: Path) -> None:
+    policy = load_policy(_REPO_POLICY)
+    tf = create(
+        _path(tmp_path, "2.md"),
+        2,
+        "coverage",
+        modules=[],
+        body="see pyproject.toml — not a path with a slash\n",
+    )
+    paths = estimate_paths(tf)
+    assert paths == []
+    floor = apply_floor(paths, [], policy)
+    assert floor.risk_floor is None
+    assert floor.matched_rules == []

@@ -22,9 +22,9 @@ _MIN_POLICY = {
     "routing": {
         "complexity": {"LOW": "cursor", "MEDIUM": "cursor", "HIGH": "codex"},
         "risk": {
-            "LOW": {"plan": "none", "review": "none"},
-            "MEDIUM": {"plan": "short", "review": "required"},
-            "HIGH": {"plan": "formal_with_human_approval", "review": "required"},
+            "LOW": {"plan_approval": False, "review": False, "evidence": False},
+            "MEDIUM": {"plan_approval": False, "review": True, "evidence": False},
+            "HIGH": {"plan_approval": True, "review": True, "evidence": True},
         },
     },
 }

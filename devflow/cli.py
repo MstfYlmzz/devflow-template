@@ -68,6 +68,7 @@ from devflow.taskfile import (
     append_section,
     body_sections,
     decision_inputs,
+    estimate_paths,
     read,
     read_doc_impact,
     update_frontmatter,
@@ -474,7 +475,7 @@ def _cmd_task_show(*, task_id: int) -> int:
         return 1
 
     epic, floor, signals, complexity, architecture_impact, uncertain = decision_inputs(
-        tf
+        tf, policy
     )
     needed = needed_triage_fields(floor, epic)
     decision = decide(
@@ -484,7 +485,7 @@ def _cmd_task_show(*, task_id: int) -> int:
         architecture_impact=architecture_impact,
         uncertain=uncertain,
         user_risk_hint=None,
-        paths=list(tf.frontmatter.modules),
+        paths=estimate_paths(tf),
         policy=policy,
         epic=epic,
     )
@@ -536,7 +537,7 @@ def _cmd_task_show(*, task_id: int) -> int:
 def _routing_decision(tf: TaskFile) -> RoutingDecision:
     policy = load_policy(_policy_path())
     epic, floor, signals, complexity, architecture_impact, uncertain = decision_inputs(
-        tf
+        tf, policy
     )
     return decide(
         floor=floor,
@@ -545,7 +546,7 @@ def _routing_decision(tf: TaskFile) -> RoutingDecision:
         architecture_impact=architecture_impact,
         uncertain=uncertain,
         user_risk_hint=None,
-        paths=list(tf.frontmatter.modules),
+        paths=estimate_paths(tf),
         policy=policy,
         epic=epic,
     )

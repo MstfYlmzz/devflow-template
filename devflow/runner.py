@@ -16,7 +16,14 @@ import yaml
 
 from devflow import agents as agents_api
 from devflow import gitops
-from devflow.agents import AgentMode, AgentResult, AgentStatus, terminate_tree
+from devflow.agents import (
+    COMMANDS,
+    AgentMode,
+    AgentResult,
+    AgentStatus,
+    _resolve_command,
+    terminate_tree,
+)
 from devflow.authority import (
     check_agent_output_for_violations,
     load_policy_from_base,
@@ -56,6 +63,7 @@ from devflow.taskfile import (
     TaskFile,
     append_section,
     decision_inputs,
+    estimate_paths,
     read,
     update_frontmatter,
 )
@@ -432,7 +440,7 @@ def _run_triage(
     messages: list[str],
 ) -> tuple[TaskFile, RoutingDecision]:
     task_id = tf.frontmatter.id
-    epic, floor, *_rest = decision_inputs(tf)
+    epic, floor, *_rest = decision_inputs(tf, policy)
     needed = needed_triage_fields(floor, epic)
     prompt = build_prompt("triage", tf, repo, {"needed": needed})
     result = _run_agent(
@@ -610,6 +618,7 @@ def _dry_run(
         _emit(messages, task_id, f"would stop for: devflow approve {task_id}")
     elif target is State.TRIAGE:
         _emit(messages, task_id, "would run triage (cursor, read_only)")
+        _warn_unconfigured(messages, task_id, "cursor", "AGENT_BLOCKED")
     else:
         rel = gitops.task_worktree(repo, task_id)
         try:
@@ -622,8 +631,12 @@ def _dry_run(
             task_id,
             f"would run implementer ({decision.implementer}, edit)",
         )
+        _warn_unconfigured(
+            messages, task_id, decision.implementer, "IMPLEMENTER_UNAVAILABLE"
+        )
         if decision.review_required and not skip_review:
             _emit(messages, task_id, "would run reviewer (claude, review)")
+            _warn_unconfigured(messages, task_id, "claude", "REVIEWER_UNAVAILABLE")
         else:
             _emit(messages, task_id, "would skip review")
     _emit(messages, task_id, "dry-run: no lock, no worktree, no agent, no file changes")
@@ -703,7 +716,7 @@ def _decide(
     tf: TaskFile, policy: dict[str, Any], risk_hint: Risk | None
 ) -> RoutingDecision:
     epic, floor, signals, complexity, architecture_impact, uncertain = decision_inputs(
-        tf
+        tf, policy
     )
     return decide(
         floor=floor,
@@ -712,7 +725,7 @@ def _decide(
         architecture_impact=architecture_impact,
         uncertain=uncertain,
         user_risk_hint=risk_hint,
-        paths=list(tf.frontmatter.modules),
+        paths=estimate_paths(tf),
         policy=policy,
         epic=epic,
     )
@@ -818,6 +831,26 @@ def _emit(messages: list[str], task_id: int, line: str) -> None:
     text = f"{task_id}: {line}"
     messages.append(text)
     print(text, flush=True)
+
+
+def _warn_unconfigured(
+    messages: list[str], task_id: int, agent: str, blocked_reason: str
+) -> None:
+    env_name = COMMANDS.get(agent)
+    if env_name is None:
+        return
+    if _resolve_command(agent) is not None:
+        return
+    _emit(
+        messages,
+        task_id,
+        f"WARNING — {agent} is not configured (set {env_name})",
+    )
+    _emit(
+        messages,
+        task_id,
+        f"a real run would stop with BLOCKED: {blocked_reason}",
+    )
 
 
 def _short(sha: str) -> str:

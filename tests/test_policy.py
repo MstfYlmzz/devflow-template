@@ -329,6 +329,7 @@ def test_decide_architecture_yes_adds_block_reason() -> None:
         policy,
     )
     assert "architecture block" in decision.reasons
+    assert decision.plan_approval_required is True
 
 
 def test_needed_triage_fields_when_floor_has_only_risk() -> None:
@@ -380,6 +381,22 @@ def test_validate_policy_reviewed_flag() -> None:
     errors = validate_policy(policy)
     assert any("template defaults" in item for item in errors)
     policy["reviewed_for_this_project"] = True
+    assert validate_policy(policy) == []
+
+
+def test_validate_policy_missing_risk_table_lists_each_level() -> None:
+    policy = copy.deepcopy(_policy())
+    policy["reviewed_for_this_project"] = True
+    del policy["routing"]["risk"]
+    errors = validate_policy(policy)
+    joined = "\n".join(errors)
+    assert "routing table missing risk levels" in joined
+    for level in ("LOW", "MEDIUM", "HIGH"):
+        assert f"routing.risk missing {level}" in joined
+
+
+def test_repo_policy_has_complete_risk_table() -> None:
+    policy = load_policy(Path(__file__).resolve().parents[1] / ".ai" / "policy.yml")
     assert validate_policy(policy) == []
 
 
