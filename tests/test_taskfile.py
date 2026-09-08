@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from devflow.freshness import ReviewRecord
 from devflow.policy import Complexity, Risk, TriageSignals
 from devflow.taskfile import (
     TaskFrontmatter,
@@ -174,6 +175,26 @@ def test_task_frontmatter_has_no_result_fields() -> None:
     names = {item.name for item in dataclasses.fields(TaskFrontmatter)}
     forbidden = {"risk", "complexity", "implementer", "review_required"}
     assert names.isdisjoint(forbidden)
+    assert "review_records" in names
+
+
+def test_review_records_roundtrip_does_not_redact_sha(tmp_path: Path) -> None:
+    path = _path(tmp_path)
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    record = ReviewRecord(
+        head_sha=sha,
+        base_sha=sha,
+        round=2,
+        blocking_findings=0,
+        unverified_high=1,
+        timestamp="2026-01-01T00:00:00Z",
+    )
+    create(path, 184, "t", review_records=[record])
+    updated = update_frontmatter(path, review_records=[record])
+    text = path.read_text(encoding="utf-8")
+    assert sha in text
+    assert updated.frontmatter.review_records[0].head_sha == sha
+    assert updated.frontmatter.review_records[0].unverified_high == 1
 
 
 def test_doc_impact_parses_all_statuses(tmp_path: Path) -> None:

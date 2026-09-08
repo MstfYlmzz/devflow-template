@@ -16,12 +16,20 @@ from devflow.agents import (
     run,
 )
 from devflow.authority import load_policy_from_base
+from devflow.freshness import (
+    check_code_freshness,
+    check_decision_validity,
+    decision_validity_blockers,
+    latest_review_record,
+)
+from devflow.gitops import git_output
 from devflow.init import expected_relative_paths, init
 from devflow.paths import repo_root, task_file
 from devflow.policy import (
     ArchitectureImpact,
     Complexity,
     EpicProposal,
+    MergeGateResult,
     Risk,
     RoutingDecision,
     apply_floor,
@@ -36,6 +44,7 @@ from devflow.states import (
     InvalidTransition,
     State,
     Trigger,
+    check_ready_to_merge,
     review_cycle_count,
     transition,
 )
@@ -581,6 +590,121 @@ def _cmd_task_transition(
     return 0
 
 
+def _short_sha(sha: str) -> str:
+    return sha[:7] if len(sha) >= 7 else sha
+
+
+def _resolve_head_and_base(root: Path) -> tuple[str, str]:
+    head = git_output(root, "rev-parse", "HEAD")
+    last_error = "cannot resolve base ref"
+    for ref in ("origin/main", "main", "master"):
+        try:
+            return head, git_output(root, "rev-parse", ref)
+        except RuntimeError as exc:
+            last_error = str(exc)
+    raise RuntimeError(last_error)
+
+
+def _passed_merge_gate() -> MergeGateResult:
+    return MergeGateResult(
+        passed=True,
+        previous_risk=Risk.LOW,
+        actual_risk=Risk.LOW,
+        matched_rules=[],
+        reason=None,
+    )
+
+
+def _cmd_task_freshness(*, task_id: int) -> int:
+    path = task_file(task_id)
+    if not path.is_file():
+        print(f"task file not found: {path}", file=sys.stderr)
+        return 1
+    try:
+        tf = read(path)
+        root = repo_root()
+        current_head, current_base = _resolve_head_and_base(root)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    record = latest_review_record(tf)
+    freshness = None
+    if record is not None:
+        try:
+            freshness = check_code_freshness(root, record, current_head, current_base)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    validity = check_decision_validity(tf)
+    latest = record
+    unverified = 0 if latest is None else latest.unverified_high
+    blocking_findings = 0 if latest is None else latest.blocking_findings
+    readiness = check_ready_to_merge(
+        tf,
+        _stub_decision(Risk.LOW),
+        True,
+        blocking_findings,
+        True,
+        _passed_merge_gate(),
+        freshness,
+    )
+
+    print(f"task {tf.frontmatter.id}")
+    if record is None:
+        print("review round: (none)")
+    else:
+        review_label = f"review round {record.round}:"
+        current_label = "current:"
+        width = max(len(review_label), len(current_label))
+        print(
+            f"{review_label:<{width}} head {_short_sha(record.head_sha)}, "
+            f"base {_short_sha(record.base_sha)}"
+        )
+        print(
+            f"{current_label:<{width}} head {_short_sha(current_head)}, "
+            f"base {_short_sha(current_base)}"
+        )
+        print()
+    if record is None:
+        print(
+            f"current:        head {_short_sha(current_head)}, "
+            f"base {_short_sha(current_base)}"
+        )
+        print()
+
+    if freshness is None:
+        freshness_text = "(no review record)"
+    elif freshness.fresh:
+        freshness_text = "fresh"
+    else:
+        freshness_text = f"STALE — {freshness.reason}"
+    print(f"{'code freshness:':<20}{freshness_text}")
+    if freshness is not None and not freshness.fresh:
+        for changed in freshness.changed_since_review:
+            print(f"  {changed}")
+
+    validity_issues = decision_validity_blockers(validity)
+    if validity_issues:
+        print(f"{'decision validity:':<20}INVALID")
+        for issue in validity_issues:
+            print(f"  {issue}")
+    else:
+        print(f"{'decision validity:':<20}valid")
+
+    if unverified:
+        print(f"{'unverified HIGH:':<20}{unverified} — needs human decision")
+    else:
+        print(f"{'unverified HIGH:':<20}0")
+
+    print()
+    if readiness.ready:
+        print("merge gate: open")
+        return 0
+    print(f"merge gate: blocked ({len(readiness.blockers)})")
+    return 1
+
+
 def _cmd_fast_lane_check(*, paths_arg: str) -> int:
     try:
         policy = load_policy(_policy_path())
@@ -634,6 +758,8 @@ def main() -> None:
         choices=[item.value for item in Trigger],
     )
     trans_parser.add_argument("--dry-run", action="store_true")
+    freshness_parser = task_sub.add_parser("freshness")
+    freshness_parser.add_argument("task_id", type=int, metavar="id")
 
     args = parser.parse_args()
     if args.command == "init":
@@ -659,6 +785,8 @@ def main() -> None:
     if args.command == "task":
         if args.task_command == "show":
             raise SystemExit(_cmd_task_show(task_id=args.task_id))
+        if args.task_command == "freshness":
+            raise SystemExit(_cmd_task_freshness(task_id=args.task_id))
         raise SystemExit(
             _cmd_task_transition(
                 task_id=args.task_id,

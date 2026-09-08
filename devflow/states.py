@@ -6,6 +6,13 @@ import enum
 import re
 from dataclasses import dataclass
 
+from devflow.freshness import (
+    FreshnessResult,
+    check_decision_validity,
+    decision_validity_blockers,
+    has_human_decision,
+    latest_review_record,
+)
 from devflow.policy import MergeGateResult, Risk, RoutingDecision
 from devflow.taskfile import TaskFile, body_sections, read_doc_impact
 
@@ -120,6 +127,7 @@ def check_ready_to_merge(
     blocking_findings: int,
     rebase_clean: bool,
     merge_gate: MergeGateResult,
+    code_freshness: FreshnessResult | None = None,
 ) -> MergeReadiness:
     _ = decision
     blockers: list[str] = []
@@ -138,6 +146,21 @@ def check_ready_to_merge(
             blockers.append("doc impact section is missing")
     if not merge_gate.passed:
         blockers.append(merge_gate.reason or "merge gate failed")
+    if code_freshness is not None and not code_freshness.fresh:
+        changed = code_freshness.changed_since_review
+        if changed:
+            blockers.append(
+                f"code changed since review ({len(changed)} files) — re-review required"
+            )
+        else:
+            blockers.append(code_freshness.reason)
+    validity = check_decision_validity(tf)
+    blockers.extend(decision_validity_blockers(validity))
+    latest = latest_review_record(tf)
+    if latest is not None and latest.unverified_high > 0 and not has_human_decision(tf):
+        blockers.append(
+            f"{latest.unverified_high} unverified HIGH findings need human decision"
+        )
     return MergeReadiness(ready=not blockers, blockers=blockers)
 
 

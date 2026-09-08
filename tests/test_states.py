@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from devflow.freshness import FreshnessResult, ReviewRecord
 from devflow.policy import (
     ArchitectureImpact,
     Complexity,
@@ -284,10 +285,100 @@ def test_ready_to_merge_collects_all_blockers(tmp_path: Path) -> None:
         _gate(passed=False),
     )
     assert result.ready is False
-    assert len(result.blockers) == 5
+    assert len(result.blockers) == 6
     joined = " ".join(result.blockers)
     assert "verify" in joined
     assert "blocking findings" in joined
     assert "rebase" in joined
     assert "doc impact" in joined
     assert "BLOCKED" in joined or "merge gate" in joined.lower()
+
+
+def _review_record(
+    *,
+    unverified_high: int = 0,
+    blocking_findings: int = 0,
+) -> ReviewRecord:
+    return ReviewRecord(
+        head_sha="abc1234",
+        base_sha="def5678",
+        round=1,
+        blocking_findings=blocking_findings,
+        unverified_high=unverified_high,
+        timestamp="2026-01-01T00:00:00Z",
+    )
+
+
+def test_ready_to_merge_stale_code_is_blocked(tmp_path: Path) -> None:
+    path = tmp_path / "1.md"
+    create(path, 1, "t", state="READY_TO_MERGE")
+    tf = append_section(path, "Doc impact", "status: none\nfiles: []\n")
+    stale = FreshnessResult(
+        fresh=False,
+        reason="3 files changed since review",
+        changed_since_review=["a.py", "b.py", "c.py"],
+    )
+    result = check_ready_to_merge(
+        tf,
+        _decision(),
+        True,
+        0,
+        True,
+        _gate(passed=True),
+        stale,
+    )
+    assert result.ready is False
+    assert "code changed since review (3 files) — re-review required" in result.blockers
+
+
+def test_ready_to_merge_unverified_high_without_decision_blocked(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "1.md"
+    create(
+        path,
+        1,
+        "t",
+        state="READY_TO_MERGE",
+        review_records=[_review_record(unverified_high=2)],
+    )
+    tf = append_section(path, "Doc impact", "status: none\nfiles: []\n")
+    result = check_ready_to_merge(
+        tf,
+        _decision(),
+        True,
+        0,
+        True,
+        _gate(passed=True),
+        FreshnessResult(True, "fresh", []),
+    )
+    assert result.ready is False
+    assert "2 unverified HIGH findings need human decision" in result.blockers
+
+
+def test_ready_to_merge_unverified_high_with_waiver_is_open(tmp_path: Path) -> None:
+    path = tmp_path / "1.md"
+    create(
+        path,
+        1,
+        "t",
+        state="READY_TO_MERGE",
+        review_records=[_review_record(unverified_high=2)],
+    )
+    append_section(path, "Doc impact", "status: none\nfiles: []\n")
+    tf = append_section(
+        path,
+        "Waivers",
+        "- id: R-003\n  reason: accepted residual risk\n",
+    )
+    result = check_ready_to_merge(
+        tf,
+        _decision(),
+        True,
+        0,
+        True,
+        _gate(passed=True),
+        FreshnessResult(True, "fresh", []),
+    )
+    assert result.ready is True
+    assert result.blockers == []
