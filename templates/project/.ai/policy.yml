@@ -68,21 +68,18 @@ floor:
       risk: HIGH
   # Narrow this low-risk list per project. Narrowing is a conscious decision.
   low:
-    - path: "**/*.css"
+    - paths: ["**/*.md", "README*"]
+      label: docs
+      risk: LOW
+      fast_lane: true
+    - paths: ["**/*.css", "**/*.scss"]
       label: style
       risk: LOW
-    - path: "**/*.scss"
-      label: style
-      risk: LOW
-    - path: "**/*.md"
+      fast_lane: true
+    - paths: ["docs/adr/**", "docs/requirements/**"]
       label: docs
       risk: LOW
-    - path: "docs/**"
-      label: docs
-      risk: LOW
-    - path: "README*"
-      label: docs
-      risk: LOW
+      fast_lane: false
     - path: "LICENSE*"
       label: docs
       risk: LOW

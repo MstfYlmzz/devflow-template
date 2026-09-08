@@ -108,7 +108,14 @@ def _posix(value: str) -> str:
 
 
 def _glob_match(value: str, pattern: str) -> bool:
-    return fnmatch.fnmatch(_posix(value), _posix(pattern))
+    value = _posix(value)
+    pattern = _posix(pattern)
+    if fnmatch.fnmatch(value, pattern):
+        return True
+    # `**/*.md` should match a root-level `notes.md`, as in gitignore globs.
+    if pattern.startswith("**/") and fnmatch.fnmatch(value, pattern[3:]):
+        return True
+    return False
 
 
 def _max_risk(*values: Risk | None) -> Risk | None:
@@ -136,6 +143,19 @@ def _rule_glob(matched: str) -> str:
 
 def _friction(risk: Risk) -> BypassFriction:
     return "none" if risk is Risk.LOW else "reason"
+
+
+def _rule_patterns(rule: dict[str, Any]) -> list[str]:
+    patterns: list[str] = []
+    raw_paths = rule.get("paths")
+    if isinstance(raw_paths, list):
+        patterns.extend(str(item) for item in raw_paths if item)
+    elif isinstance(raw_paths, str) and raw_paths.strip():
+        patterns.append(raw_paths)
+    single = rule.get("path")
+    if isinstance(single, str) and single.strip():
+        patterns.append(single)
+    return patterns
 
 
 def _floor_rules(policy: dict[str, Any]) -> list[dict[str, Any]]:
@@ -175,15 +195,17 @@ def apply_floor(
     architecture_block = False
 
     for rule in _floor_rules(policy):
-        pattern = str(rule.get("path", ""))
+        patterns = _rule_patterns(rule)
         rule_label = str(rule.get("label", ""))
         hits: list[str] = []
         for path in paths:
-            if pattern and _glob_match(path, pattern):
-                hits.append(f"{pattern} (path: {path})")
+            for pattern in patterns:
+                if pattern and _glob_match(path, pattern):
+                    hits.append(f"{pattern} (path: {path})")
         for label in labels:
-            if pattern and _glob_match(label, pattern):
-                hits.append(f"{pattern} (label: {label})")
+            for pattern in patterns:
+                if pattern and _glob_match(label, pattern):
+                    hits.append(f"{pattern} (label: {label})")
             if rule_label and label.casefold() == rule_label.casefold():
                 hits.append(f"{rule_label} (label: {label})")
         if not hits:
@@ -351,6 +373,33 @@ def check_merge_gate(
     )
 
 
+def fast_lane_eligible(paths: list[str], policy: dict[str, Any]) -> tuple[bool, str]:
+    if not paths:
+        return False, "no paths given"
+    for path in paths:
+        blocking: list[tuple[str, Risk | None]] = []
+        matched = False
+        for rule in _floor_rules(policy):
+            for pattern in _rule_patterns(rule):
+                if not pattern or not _glob_match(path, pattern):
+                    continue
+                matched = True
+                if rule.get("fast_lane") is True:
+                    continue
+                risk = None
+                if "risk" in rule:
+                    risk = _parse_enum(Risk, rule["risk"])
+                blocking.append((pattern, risk))
+        if not matched:
+            return False, f"{path}: unmatched path"
+        if blocking:
+            pattern, risk = blocking[0]
+            if risk is not None:
+                return False, f"{path} matches {pattern} (risk {risk.value})"
+            return False, f"{path} matches {pattern}"
+    return True, "all paths fast-lane eligible"
+
+
 def validate_policy(policy: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if policy.get("reviewed_for_this_project") is not True:
@@ -383,5 +432,13 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
                 errors.append(f"unknown signal in signal_floor: {name}")
     else:
         errors.append("signal_floor must be a mapping")
+
+    for rule in _floor_rules(policy):
+        if rule.get("fast_lane") is not True:
+            continue
+        risk_raw = rule.get("risk")
+        if risk_raw is None or str(risk_raw).strip().upper() != Risk.LOW.value:
+            patterns = ", ".join(_rule_patterns(rule)) or "(unnamed rule)"
+            errors.append(f"fast_lane: true requires risk LOW ({patterns})")
 
     return errors

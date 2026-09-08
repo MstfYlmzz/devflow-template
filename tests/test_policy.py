@@ -14,6 +14,7 @@ from devflow.policy import (
     apply_floor,
     check_merge_gate,
     decide,
+    fast_lane_eligible,
     load_policy,
     needed_triage_fields,
     risk_from_signals,
@@ -407,3 +408,61 @@ def test_check_merge_unexpected_file_without_floor_match_passes() -> None:
     previous = _decision(policy, floor=PolicyResult(Risk.MEDIUM, None, False, []))
     result = check_merge_gate(previous, ["src/orders/unexpected.py"], policy)
     assert result.passed is True
+
+
+def test_fast_lane_markdown_only() -> None:
+    ok, reason = fast_lane_eligible(["README.md", "notes.md"], _policy())
+    assert ok is True
+    assert reason == "all paths fast-lane eligible"
+
+
+def test_fast_lane_css_only() -> None:
+    ok, reason = fast_lane_eligible(["styles/main.css"], _policy())
+    assert ok is True
+    assert reason == "all paths fast-lane eligible"
+
+
+def test_fast_lane_auth_css_conflict_is_not_eligible() -> None:
+    ok, reason = fast_lane_eligible(["src/auth/login.css"], _policy())
+    assert ok is False
+    assert "src/auth/login.css" in reason
+    assert "**/*auth*" in reason or "**/*login*" in reason
+    assert "HIGH" in reason
+
+
+def test_fast_lane_adr_is_not_eligible() -> None:
+    ok, reason = fast_lane_eligible(["docs/adr/ADR-014.md"], _policy())
+    assert ok is False
+    assert "docs/adr" in reason
+
+
+def test_fast_lane_unmatched_path() -> None:
+    ok, reason = fast_lane_eligible(["src/orders/service.py"], _policy())
+    assert ok is False
+    assert reason == "src/orders/service.py: unmatched path"
+
+
+def test_fast_lane_markdown_and_css_mix() -> None:
+    ok, reason = fast_lane_eligible(["README.md", "styles/main.css"], _policy())
+    assert ok is True
+    assert reason == "all paths fast-lane eligible"
+
+
+def test_fast_lane_one_unmatched_file_disqualifies() -> None:
+    ok, reason = fast_lane_eligible(["README.md", "src/orders/service.py"], _policy())
+    assert ok is False
+    assert "src/orders/service.py" in reason
+
+
+def test_fast_lane_empty_paths_not_eligible() -> None:
+    ok, reason = fast_lane_eligible([], _policy())
+    assert ok is False
+    assert reason
+
+
+def test_validate_policy_fast_lane_requires_low_risk() -> None:
+    policy = copy.deepcopy(_policy())
+    policy["reviewed_for_this_project"] = True
+    policy["floor"]["high"][0]["fast_lane"] = True
+    errors = validate_policy(policy)
+    assert any("fast_lane" in item and "LOW" in item for item in errors)
