@@ -44,6 +44,10 @@ CONTROL_PATHS: list[str] = [
     "scripts/verify.d/**",
     ".github/workflows/**",
     ".githooks/**",
+    # In this repo, devflow's own source is part of the control mechanism
+    # (check_control_changes lives here). Consumer projects keep app code
+    # under src/** and depend on devflow as a package.
+    "devflow/**",
 ]
 
 _ALLOWED_WITH_CONTROL: tuple[str, ...] = (

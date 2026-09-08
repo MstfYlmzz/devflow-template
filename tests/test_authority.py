@@ -136,11 +136,28 @@ def test_control_with_task_file_ok() -> None:
     assert result.ok is True
 
 
+def test_control_with_devflow_source_ok() -> None:
+    result = check_control_changes([".ai/policy.yml", "devflow/authority.py"])
+    assert result.ok is True
+    assert result.touches_control is True
+
+
+def test_devflow_source_alone_is_control() -> None:
+    result = check_control_changes(["devflow/policy.py"])
+    assert result.touches_control is True
+    assert result.ok is True
+
+
 def test_control_with_src_not_ok() -> None:
     result = check_control_changes([".ai/policy.yml", "src/orders/service.py"])
     assert result.ok is False
     assert "src/orders/service.py" in result.message
     assert ".ai/policy.yml" in result.message
+
+
+def test_devflow_with_src_not_ok() -> None:
+    result = check_control_changes(["devflow/cli.py", "src/orders/service.py"])
+    assert result.ok is False
 
 
 def test_verify_script_with_docs_ok() -> None:
@@ -167,3 +184,4 @@ def test_agent_output_clean_for_normal_code() -> None:
 
 def test_control_paths_include_github_workflows() -> None:
     assert ".github/workflows/**" in CONTROL_PATHS
+    assert "devflow/**" in CONTROL_PATHS
