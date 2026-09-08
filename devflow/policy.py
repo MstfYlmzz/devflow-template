@@ -151,6 +151,12 @@ def _floor_rules(policy: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def load_policy(path: Path) -> dict[str, Any]:
+    """Load policy.yml from a working-tree path.
+
+    Use this for interactive commands such as `devflow classify`. Merge
+    checks and the runner must call load_policy_from_base() so a branch
+    cannot weaken the rules that review it.
+    """
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("policy.yml must be a mapping")

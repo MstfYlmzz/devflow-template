@@ -15,8 +15,9 @@ from devflow.agents import (
     _resolve_command,
     run,
 )
+from devflow.authority import load_policy_from_base
 from devflow.init import expected_relative_paths, init
-from devflow.paths import task_file
+from devflow.paths import repo_root, task_file
 from devflow.policy import (
     ArchitectureImpact,
     Complexity,
@@ -339,9 +340,9 @@ def _stub_decision(risk: Risk) -> RoutingDecision:
 
 def _cmd_check_merge(*, risk_arg: str, paths_arg: str) -> int:
     try:
-        policy = load_policy(_policy_path())
+        policy = load_policy_from_base(repo_root())
         previous = Risk(risk_arg.strip().upper())
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
