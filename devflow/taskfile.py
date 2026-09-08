@@ -15,7 +15,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 
 import yaml
 
@@ -27,6 +27,7 @@ from devflow.policy import (
     PolicyResult,
     Risk,
     TriageSignals,
+    apply_floor,
 )
 
 DocImpactStatus = Literal["none", "updated", "adr_required"]
@@ -45,6 +46,7 @@ SECRET_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 _HEADING_RE = re.compile(r"^## ([^#].*?)\s*$", re.MULTILINE)
+_ISSUE_TOKEN = re.compile(r"[^\s`\"'<>()\[\]{}]+")
 _COMPILED_SECRETS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern), replacement) for pattern, replacement in SECRET_PATTERNS
 )
@@ -99,8 +101,45 @@ def body_sections(tf: TaskFile) -> list[str]:
     return [match.group(1).strip() for match in _HEADING_RE.finditer(tf.body)]
 
 
+def estimate_paths(tf: TaskFile) -> list[str]:
+    """Guess likely paths for the first floor pass.
+
+    This is an estimate. The real diff is checked later at the merge
+    gate. These candidates only feed apply_floor so a module name like
+    ``authority`` can match ``devflow/**`` before any code exists.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def add(item: str) -> None:
+        if item and item not in seen:
+            seen.add(item)
+            paths.append(item)
+
+    for module in tf.frontmatter.modules:
+        name = module.strip().replace("\\", "/").strip("/")
+        if not name:
+            continue
+        add(f"devflow/{name}.py")
+        add(f"src/{name}/**")
+        add(f"**/{name}/**")
+        add(f"**/*{name}*")
+
+    text = tf.body.replace("\\", "/")
+    for raw in _ISSUE_TOKEN.findall(text):
+        token = raw.strip(".,;:")
+        if "/" not in token:
+            continue
+        suffix = Path(token).suffix
+        if len(suffix) < 2 or not suffix[1:].isalnum():
+            continue
+        add(token)
+    return paths
+
+
 def decision_inputs(
     tf: TaskFile,
+    policy: dict[str, Any] | None = None,
 ) -> tuple[
     EpicProposal | None,
     PolicyResult,
@@ -121,12 +160,15 @@ def decision_inputs(
             complexity=fm.complexity_proposed,
             reason=fm.risk_reason,
         )
-    floor = PolicyResult(
-        risk_floor=fm.floor_risk,
-        complexity_hint=None,
-        architecture_block=False,
-        matched_rules=list(fm.floor_matched),
-    )
+    if policy is None:
+        floor = PolicyResult(
+            risk_floor=fm.floor_risk,
+            complexity_hint=None,
+            architecture_block=False,
+            matched_rules=list(fm.floor_matched),
+        )
+    else:
+        floor = apply_floor(estimate_paths(tf), [], policy)
     architecture_impact = fm.architecture_impact or ArchitectureImpact.NONE
     return (
         epic,

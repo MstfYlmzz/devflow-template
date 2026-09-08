@@ -36,7 +36,14 @@ def _origin_main(repo: Path) -> None:
 def _seed(repo: Path) -> None:
     ai = repo / ".ai" / "roles"
     ai.mkdir(parents=True)
-    (repo / ".ai" / "policy.yml").write_text(_POLICY, encoding="utf-8")
+    (repo / ".ai" / "policy.yml").write_text(
+        _POLICY.replace(
+            "reviewed_for_this_project: false",
+            "reviewed_for_this_project: true",
+            1,
+        ),
+        encoding="utf-8",
+    )
     for path in (_TEMPLATES / ".ai" / "roles").iterdir():
         (ai / path.name).write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     (repo / "src").mkdir()
@@ -344,6 +351,35 @@ def test_dry_run_makes_no_changes(project: Path) -> None:
     assert not task_worktree(project, 184).exists()
     assert path.read_text(encoding="utf-8") == before
     assert any("dry-run" in item for item in result.messages)
+
+
+def test_dry_run_warns_when_providers_unconfigured(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _task(project, **_epic())
+    monkeypatch.delenv("DEVFLOW_CURSOR_CMD", raising=False)
+    monkeypatch.delenv("DEVFLOW_CLAUDE_CMD", raising=False)
+    result = start(project, 184, dry_run=True)
+    assert result.final_state is State.BACKLOG
+    joined = "\n".join(result.messages)
+    assert "would run implementer (cursor, edit)" in joined
+    assert "WARNING — cursor is not configured (set DEVFLOW_CURSOR_CMD)" in joined
+    assert "a real run would stop with BLOCKED: IMPLEMENTER_UNAVAILABLE" in joined
+    assert "would run reviewer (claude, review)" in joined
+    assert "WARNING — claude is not configured (set DEVFLOW_CLAUDE_CMD)" in joined
+    assert "a real run would stop with BLOCKED: REVIEWER_UNAVAILABLE" in joined
+
+
+def test_dry_run_skips_provider_warning_when_configured(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _task(project, **_epic())
+    monkeypatch.setenv("DEVFLOW_CURSOR_CMD", "cursor-agent")
+    monkeypatch.setenv("DEVFLOW_CLAUDE_CMD", "claude")
+    result = start(project, 184, dry_run=True)
+    joined = "\n".join(result.messages)
+    assert "WARNING" not in joined
+    assert "IMPLEMENTER_UNAVAILABLE" not in joined
 
 
 def test_exception_releases_lock(

@@ -36,6 +36,8 @@ def needs_fast_lane(changed: list[str]) -> bool:
 
 
 def _fast_lane_should_run(changed: list[str], control: ControlChangeResult) -> bool:
+    if not changed:
+        return False
     if not control.ok:
         return False
     if any(path.startswith(_TASK_PREFIX) for path in changed):
@@ -58,6 +60,8 @@ def _fast_lane_line(
     control: ControlChangeResult,
     policy: dict[str, Any],
 ) -> tuple[str, bool]:
+    if not changed:
+        return f"{_FAST_LABEL}skipped (no changes)", True
     if not _fast_lane_should_run(changed, control):
         if not control.ok:
             return f"{_FAST_LABEL}skipped", True

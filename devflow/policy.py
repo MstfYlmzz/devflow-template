@@ -332,16 +332,24 @@ def decide(
     implementer = str(
         routing.get("complexity", {}).get(chosen_complexity.value, "cursor")
     )
-    risk_route = routing.get("risk", {}).get(risk.value, {})
-    review = str(risk_route.get("review", "none"))
+    risk_table = routing.get("risk") if isinstance(routing, dict) else None
+    risk_route: dict[str, Any] = {}
+    if isinstance(risk_table, dict):
+        raw_route = risk_table.get(risk.value, {})
+        if isinstance(raw_route, dict):
+            risk_route = raw_route
     detail = plan_detail_for(chosen_complexity)
+    plan_approval_required = risk_route.get("plan_approval") is True
+    if architecture_impact in {ArchitectureImpact.POSSIBLE, ArchitectureImpact.YES}:
+        plan_approval_required = True
+    # Approval needs an artifact to approve. Complexity still
+    # chooses plan depth; approval only sets a floor of "brief".
+    if plan_approval_required and detail == "none":
+        detail = "brief"
+        reasons.append("plan raised to brief: approval required")
     plan_required = detail != "none"
-    plan_approval_required = risk is Risk.HIGH or architecture_impact in {
-        ArchitectureImpact.POSSIBLE,
-        ArchitectureImpact.YES,
-    }
-    review_required = review != "none"
-    evidence_required = review == "required_with_evidence"
+    review_required = risk_route.get("review") is True
+    evidence_required = risk_route.get("evidence") is True
 
     if architecture_impact in {ArchitectureImpact.POSSIBLE, ArchitectureImpact.YES}:
         reasons.append("architecture block")
@@ -434,10 +442,10 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
                 errors.append(f"routing.complexity missing {level}")
     if not isinstance(risk_table, dict):
         errors.append("routing table missing risk levels")
-    else:
-        for level in _LEVELS:
-            if level not in risk_table:
-                errors.append(f"routing.risk missing {level}")
+        risk_table = {}
+    for level in _LEVELS:
+        if level not in risk_table:
+            errors.append(f"routing.risk is missing level: {level}")
 
     signal_floor = policy.get("signal_floor") or {}
     if isinstance(signal_floor, dict):

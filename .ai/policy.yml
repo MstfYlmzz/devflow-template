@@ -28,5 +28,9 @@ routing:
     LOW: cursor
     MEDIUM: cursor
     HIGH: codex
+  risk:
+    LOW:    {plan_approval: false, review: false, evidence: false}
+    MEDIUM: {plan_approval: false, review: true,  evidence: false}
+    HIGH:   {plan_approval: true,  review: true,  evidence: true}
   review_max_cycles: 2
   agent_timeout_minutes: 20

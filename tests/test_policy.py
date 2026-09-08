@@ -296,6 +296,43 @@ def test_plan_detail_follows_complexity() -> None:
         assert decision.plan_required is (detail != "none")
 
 
+def test_high_risk_low_complexity_raises_plan_to_brief() -> None:
+    policy = _policy()
+    floor = PolicyResult(Risk.HIGH, None, False, [])
+    decision = decide(
+        floor,
+        _quiet(),
+        Complexity.LOW,
+        ArchitectureImpact.NONE,
+        False,
+        None,
+        ["src/auth/login.py"],
+        policy,
+    )
+    assert decision.plan_detail == "brief"
+    assert decision.plan_required is True
+    assert decision.plan_approval_required is True
+    assert "plan raised to brief: approval required" in decision.reasons
+
+
+def test_high_risk_high_complexity_keeps_formal_plan() -> None:
+    policy = _policy()
+    floor = PolicyResult(Risk.HIGH, None, False, [])
+    decision = decide(
+        floor,
+        _quiet(),
+        Complexity.HIGH,
+        ArchitectureImpact.NONE,
+        False,
+        None,
+        ["src/auth/login.py"],
+        policy,
+    )
+    assert decision.plan_detail == "formal"
+    assert decision.plan_approval_required is True
+    assert "plan raised to brief: approval required" not in decision.reasons
+
+
 def test_low_risk_high_complexity_formal_plan_without_approval() -> None:
     policy = _policy()
     floor = PolicyResult(Risk.LOW, None, False, [])
@@ -315,6 +352,24 @@ def test_low_risk_high_complexity_formal_plan_without_approval() -> None:
     assert decision.plan_approval_required is False
 
 
+def test_low_risk_low_complexity_has_no_plan() -> None:
+    policy = _policy()
+    floor = PolicyResult(Risk.LOW, None, False, [])
+    decision = decide(
+        floor,
+        _quiet(),
+        Complexity.LOW,
+        ArchitectureImpact.NONE,
+        False,
+        None,
+        ["styles/main.css"],
+        policy,
+    )
+    assert decision.plan_detail == "none"
+    assert decision.plan_required is False
+    assert decision.plan_approval_required is False
+
+
 def test_decide_architecture_yes_adds_block_reason() -> None:
     policy = _policy()
     floor = PolicyResult(None, None, False, [])
@@ -329,6 +384,7 @@ def test_decide_architecture_yes_adds_block_reason() -> None:
         policy,
     )
     assert "architecture block" in decision.reasons
+    assert decision.plan_approval_required is True
 
 
 def test_needed_triage_fields_when_floor_has_only_risk() -> None:
@@ -380,6 +436,22 @@ def test_validate_policy_reviewed_flag() -> None:
     errors = validate_policy(policy)
     assert any("template defaults" in item for item in errors)
     policy["reviewed_for_this_project"] = True
+    assert validate_policy(policy) == []
+
+
+def test_validate_policy_missing_risk_table_lists_each_level() -> None:
+    policy = copy.deepcopy(_policy())
+    policy["reviewed_for_this_project"] = True
+    del policy["routing"]["risk"]
+    errors = validate_policy(policy)
+    joined = "\n".join(errors)
+    assert "routing table missing risk levels" in joined
+    for level in ("LOW", "MEDIUM", "HIGH"):
+        assert f"routing.risk is missing level: {level}" in joined
+
+
+def test_repo_policy_has_complete_risk_table() -> None:
+    policy = load_policy(Path(__file__).resolve().parents[1] / ".ai" / "policy.yml")
     assert validate_policy(policy) == []
 
 
