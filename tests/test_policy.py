@@ -270,6 +270,49 @@ def test_decide_high_risk_requires_evidence_and_plan_approval() -> None:
     )
     assert decision.evidence_required is True
     assert decision.plan_approval_required is True
+    assert decision.plan_detail == "brief"
+
+
+def test_plan_detail_follows_complexity() -> None:
+    policy = _policy()
+    floor = PolicyResult(None, None, False, [])
+    mapping = {
+        Complexity.LOW: "none",
+        Complexity.MEDIUM: "brief",
+        Complexity.HIGH: "formal",
+    }
+    for complexity, detail in mapping.items():
+        decision = decide(
+            floor,
+            _quiet(),
+            complexity,
+            ArchitectureImpact.NONE,
+            False,
+            None,
+            ["src/orders/service.py"],
+            policy,
+        )
+        assert decision.plan_detail == detail
+        assert decision.plan_required is (detail != "none")
+
+
+def test_low_risk_high_complexity_formal_plan_without_approval() -> None:
+    policy = _policy()
+    floor = PolicyResult(Risk.LOW, None, False, [])
+    decision = decide(
+        floor,
+        _quiet(),
+        Complexity.HIGH,
+        ArchitectureImpact.NONE,
+        False,
+        None,
+        ["styles/main.css"],
+        policy,
+    )
+    assert decision.risk is Risk.LOW
+    assert decision.complexity is Complexity.HIGH
+    assert decision.plan_detail == "formal"
+    assert decision.plan_approval_required is False
 
 
 def test_decide_architecture_yes_adds_block_reason() -> None:

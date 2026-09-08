@@ -18,8 +18,8 @@ from typing import Literal
 
 from devflow.taskfile import atomic_write
 
-Stage = Literal["triage", "implement", "review"]
-_STAGES = {"triage", "implement", "review"}
+Stage = Literal["start", "triage", "implement", "review"]
+_STAGES = {"start", "triage", "implement", "review"}
 
 LOCKS_GITIGNORE_LINE = ".devflow/locks/"
 
@@ -113,6 +113,21 @@ def acquire(task_id: int, stage: Stage, repo: Path) -> RunLock:
 def release(task_id: int, repo: Path) -> None:
     path = lock_path(task_id, repo)
     path.unlink(missing_ok=True)
+
+
+def set_agent_pid(task_id: int, repo: Path, agent_pid: int | None) -> None:
+    existing = read_lock(task_id, repo)
+    if existing is None:
+        return
+    updated = RunLock(
+        task_id=existing.task_id,
+        pid=existing.pid,
+        started_at=existing.started_at,
+        host=existing.host,
+        stage=existing.stage,
+        agent_pid=agent_pid,
+    )
+    atomic_write(lock_path(task_id, repo), json.dumps(asdict(updated), indent=2) + "\n")
 
 
 def ignores_lock_dir(gitignore_text: str) -> bool:
