@@ -16,6 +16,9 @@ _KNOWN_SIGNALS = (
     "unfamiliar_area",
 )
 _LEVELS = ("LOW", "MEDIUM", "HIGH")
+# Keep in sync with ``devflow.agents.COMMANDS`` keys (no import — avoids cycle
+# via policy → agents → authority → policy).
+_KNOWN_AGENTS = frozenset({"cursor", "codex", "claude"})
 _REVIEWED_ERROR = (
     "policy.yml still has template defaults.\n"
     "Review floor globs for this project, then set\n"
@@ -431,9 +434,20 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
     if missing:
         errors.append(f"policy.yml missing keys: {', '.join(missing)}")
 
-    routing = policy.get("routing") or {}
-    complexity_table = routing.get("complexity") if isinstance(routing, dict) else None
-    risk_table = routing.get("risk") if isinstance(routing, dict) else None
+    routing_raw = policy.get("routing")
+    if not isinstance(routing_raw, dict):
+        if "routing" in policy:
+            errors.append("routing must be a mapping")
+        routing: dict[str, Any] = {}
+    else:
+        routing = routing_raw
+    complexity_table = routing.get("complexity")
+    risk_table = routing.get("risk")
+    triage = routing.get("triage")
+    if not isinstance(triage, str) or not triage.strip():
+        errors.append("routing.triage is required")
+    elif triage.strip() not in _KNOWN_AGENTS:
+        errors.append(f"routing.triage unknown agent: {triage.strip()}")
     if not isinstance(complexity_table, dict):
         errors.append("routing table missing complexity levels")
     else:
@@ -464,3 +478,17 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
             errors.append(f"fast_lane: true requires risk LOW ({patterns})")
 
     return errors
+
+
+def triage_provider(policy: dict[str, Any]) -> str:
+    """Return ``routing.triage``. Policy must already be validated."""
+    routing = policy.get("routing") or {}
+    if not isinstance(routing, dict):
+        raise ValueError("routing.triage is required")
+    raw = routing.get("triage")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("routing.triage is required")
+    agent = raw.strip()
+    if agent not in _KNOWN_AGENTS:
+        raise ValueError(f"routing.triage unknown agent: {agent}")
+    return agent

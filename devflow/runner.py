@@ -50,6 +50,7 @@ from devflow.policy import (
     check_merge_gate,
     decide,
     needed_triage_fields,
+    triage_provider,
 )
 from devflow.prompts import build_prompt
 from devflow.review import parse_findings
@@ -743,20 +744,30 @@ def _run_triage(
     agent_cwd = worktree if worktree.is_dir() else repo
     role_root = agent_cwd if (agent_cwd / ".ai" / "roles").is_dir() else repo
     prompt = build_prompt("triage", tf, role_root, {"needed": needed})
-    result = _run_agent(
-        repo,
-        task_id,
-        "cursor",
-        prompt,
-        agent_cwd,
-        AgentMode.READ_ONLY,
-        _timeout(policy),
-        path,
-    )
+    agent = triage_provider(policy)
+    defined = agents_api._defined_modes(agent)
+    if defined and AgentMode.READ_ONLY not in defined:
+        result = AgentResult(
+            AgentStatus.BLOCKED,
+            "",
+            f"{agent} does not support mode {AgentMode.READ_ONLY.value}",
+            0.0,
+        )
+    else:
+        result = _run_agent(
+            repo,
+            task_id,
+            agent,
+            prompt,
+            agent_cwd,
+            AgentMode.READ_ONLY,
+            _timeout(policy),
+            path,
+        )
     _emit(
         messages,
         task_id,
-        f"triage (cursor, read_only)... {int(result.duration_seconds)}s",
+        f"triage ({agent}, read_only)... {int(result.duration_seconds)}s",
     )
     if result.status is AgentStatus.BLOCKED:
         tf = _block(path, State.TRIAGE, "AGENT_BLOCKED", decision, messages)
@@ -915,8 +926,9 @@ def _dry_run(
         target = initial_state(decision, _has_epic(tf))
     _emit(messages, task_id, f"{current.value} -> {target.value} (dry-run)")
     if target is State.TRIAGE:
-        _emit(messages, task_id, "would run triage (cursor, read_only)")
-        _warn_unconfigured(messages, task_id, "cursor", "AGENT_BLOCKED")
+        agent = triage_provider(policy)
+        _emit(messages, task_id, f"would run triage ({agent}, read_only)")
+        _warn_unconfigured(messages, task_id, agent, "AGENT_BLOCKED")
     else:
         if decision.plan_required or target is State.IMPLEMENTING:
             rel = gitops.task_worktree(repo, task_id)

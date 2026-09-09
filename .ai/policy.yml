@@ -24,11 +24,12 @@ signal_floor:
   unfamiliar_area: MEDIUM
 
 routing:
+  # TEMPORARY BOOTSTRAP ROUTING:
+  # Cursor CLI is not configured and Claude quota may be unavailable.
+  # Use Codex for triage and implementation in this repository.
+  # Restore triage/LOW/MEDIUM to Cursor when the Cursor adapter is available.
+  triage: codex
   complexity:
-    # TEMPORARY BOOTSTRAP ROUTING:
-    # Cursor CLI is not configured and Claude quota is currently unavailable.
-    # Restore LOW/MEDIUM -> cursor when the Cursor adapter is available.
-    # HIGH remains codex in the intended architecture.
     LOW: codex
     MEDIUM: codex
     HIGH: codex
