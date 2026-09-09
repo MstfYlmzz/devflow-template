@@ -44,14 +44,17 @@ remove_venv_dir() {
 
 create_venv() {
   local py="$1"
+  local status=0
   if [[ -e .venv || -L .venv ]]; then
     remove_venv_dir || {
       echo "error: existing .venv could not be removed" >&2
       return 1
     }
   fi
-  if ! "$py" -m venv .venv; then
-    local status=$?
+  # ``cmd || status=$?`` keeps the real exit code under ``set -e``;
+  # ``if ! cmd; status=$?`` would observe the negated-condition status.
+  "$py" -m venv .venv || status=$?
+  if [[ "$status" -ne 0 ]]; then
     remove_venv_dir || true
     echo "error: failed to create .venv with $py" >&2
     return "$status"

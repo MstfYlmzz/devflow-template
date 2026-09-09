@@ -48,7 +48,13 @@ def _fake_bin(root: Path) -> Path:
 
 
 def _path_env(bin_dir: Path) -> dict[str, str]:
-    """Build a PATH where fake interpreters win and host Python is invisible.
+    """Build a PATH where fake interpreters are tried before host tools.
+
+    Fake binaries are prepended, then the Bash directory (needed so the
+    script can run). On Linux that Bash directory is often ``/usr/bin``,
+    which may also contain a real host ``python`` / ``python3``. Tests that
+    care about selection must therefore install explicit fake candidates
+    for both names rather than assuming the host interpreters are hidden.
 
     On Windows, Git Bash receives PATH via CreateProcess using Windows
     ``;``-separated entries (not a POSIX ``:`` PATH).
@@ -120,7 +126,7 @@ def _failing_venv_python_stub() -> str:
           mkdir -p "$dest/lib64" "$dest/Scripts"
           printf 'partial\\n' > "$dest/pyvenv.cfg"
           echo "venv boom" >&2
-          exit 1
+          exit 37
         fi
         exit 1
         """
@@ -146,6 +152,7 @@ def test_setup_worktree_root_template_parity() -> None:
     assert "sys.version_info >= (3, 11)" in text
     assert "error: Python 3.11+ not found" in text
     assert "remove_venv_dir" in text
+    assert '"$py" -m venv .venv || status=$?' in text
 
 
 def test_prefers_working_python_over_broken_python3(tmp_path: Path) -> None:
@@ -165,6 +172,8 @@ def test_prefers_working_python_over_broken_python3(tmp_path: Path) -> None:
 
 def test_falls_back_to_working_python3(tmp_path: Path) -> None:
     bin_dir = _fake_bin(tmp_path)
+    # Explicit unusable `python` so a host /usr/bin/python cannot win first.
+    _write_exec(bin_dir / "python", _broken_python_stub())
     _write_exec(bin_dir / "python3", _usable_python_stub())
     _install_script(tmp_path)
     result = _bash(
@@ -216,6 +225,6 @@ def test_partial_venv_cleaned_on_failure(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     result = _bash("scripts/setup-worktree", env=_path_env(bin_dir), cwd=tmp_path)
-    assert result.returncode != 0
+    assert result.returncode == 37
     assert "failed to create .venv" in result.stderr
     assert not (tmp_path / ".venv").exists()
