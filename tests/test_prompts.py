@@ -89,3 +89,31 @@ def test_missing_role_file_raises(tmp_path: Path) -> None:
     tf = read(_task(tmp_path))
     with pytest.raises(FileNotFoundError):
         build_prompt("triage", tf, tmp_path, {})
+
+
+def test_triage_prompt_focus_list_does_not_imply_partial_output(tmp_path: Path) -> None:
+    _role(
+        tmp_path,
+        "triage",
+        (
+            "# Triage\n\n"
+            "Always emit the complete YAML schema shown above.\n"
+            "uncertain must be present.\n"
+        ),
+    )
+    tf = read(_task(tmp_path))
+    text = build_prompt(
+        "triage",
+        tf,
+        tmp_path,
+        {"needed": ["complexity", "architecture_impact", "signals"]},
+    )
+    assert "Needed fields:" not in text
+    assert "emit only those fields" not in text.casefold()
+    assert (
+        "Fields requiring fresh assessment: complexity, architecture_impact, signals"
+        in text
+    )
+    assert "Return the complete triage schema regardless of this focus list." in text
+    assert "Always emit the complete YAML schema" in text
+    assert "uncertain" in text

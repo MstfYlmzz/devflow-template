@@ -112,6 +112,10 @@ def test_triage_roles_forbid_union_placeholders() -> None:
         assert "choose exactly one" in text.casefold() or "Allowed values" in text
         assert "complexity: MEDIUM" in text
         assert "architecture_impact: NONE" in text
+        assert "If only missing fields were requested" not in text
+        assert "Always emit the complete YAML schema" in text
+        assert "still return every output field" in text
+        assert "- `uncertain`" in text
 
 
 def test_parse_rejects_complexity_union_placeholder() -> None:
@@ -238,6 +242,38 @@ def test_runner_valid_triage_continues(
     tf = read(active)
     assert tf.frontmatter.complexity_proposed is Complexity.MEDIUM
     assert tf.frontmatter.architecture_impact is ArchitectureImpact.NONE
+    assert tf.frontmatter.blocked_reason is None
+
+
+def test_runner_accepts_complete_schema_matching_task24_shape(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real Task 24 failure omitted ``uncertain``; complete schema must pass."""
+    create(task_path(project, 27), 27, "Control path coverage", modules=["src/app.py"])
+    git("add", "-A", cwd=project)
+    git("commit", "-m", "task", cwd=project)
+    _origin_main(project)
+    complete = (
+        "```yaml\n"
+        "signals:\n"
+        "  transaction_change: false\n"
+        "  concurrency_sensitive: false\n"
+        "  architecture_boundary_change: true\n"
+        "  unfamiliar_area: false\n"
+        "complexity: MEDIUM\n"
+        "architecture_impact: POSSIBLE\n"
+        "uncertain: false\n"
+        "```\n"
+    )
+    monkeypatch.setattr("devflow.agents.run", _agent_returning(complete))
+    result = start(project, 27)
+    assert result.final_state is State.PLAN_APPROVAL
+    active = resolve_task(project, 27)
+    assert active is not None
+    tf = read(active)
+    assert tf.frontmatter.complexity_proposed is Complexity.MEDIUM
+    assert tf.frontmatter.architecture_impact is ArchitectureImpact.POSSIBLE
+    assert tf.frontmatter.uncertain is False
     assert tf.frontmatter.blocked_reason is None
 
 
