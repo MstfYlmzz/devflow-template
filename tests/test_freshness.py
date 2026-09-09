@@ -12,12 +12,12 @@ from tests.conftest import git
 
 
 def _sha(repo: Path) -> str:
-    return git(repo, "rev-parse", "HEAD").stdout.strip()
+    return git("rev-parse", "HEAD", cwd=repo).stdout.strip()
 
 
 def _commit(repo: Path, message: str) -> str:
-    git(repo, "add", "-A")
-    git(repo, "commit", "-m", message)
+    git("add", "-A", cwd=repo)
+    git("commit", "-m", message, cwd=repo)
     return _sha(repo)
 
 
@@ -87,11 +87,11 @@ def test_code_freshness_source_change_is_stale(git_repo: Path) -> None:
 def test_code_freshness_base_moved_head_same_is_stale(git_repo: Path) -> None:
     repo = _app_repo(git_repo)
     reviewed = _sha(repo)
-    git(repo, "checkout", "-b", "task")
-    git(repo, "checkout", "main")
+    git("checkout", "-b", "task", cwd=repo)
+    git("checkout", "main", cwd=repo)
     (repo / "other.py").write_text("x = 1\n", encoding="utf-8")
     moved_base = _commit(repo, "main moved")
-    git(repo, "checkout", "task")
+    git("checkout", "task", cwd=repo)
     head = _sha(repo)
     assert head == reviewed
     result = check_code_freshness(

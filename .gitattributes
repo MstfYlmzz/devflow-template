@@ -1,0 +1,3 @@
+# Bash scripts break on CRLF (`set -euo pipefail` / `exit 1`).
+scripts/** text eol=lf
+templates/project/scripts/** text eol=lf

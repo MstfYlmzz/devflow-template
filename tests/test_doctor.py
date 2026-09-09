@@ -17,7 +17,7 @@ def _add_language_stage(root: Path) -> None:
 
 
 def _set_hooks_path(root: Path) -> None:
-    git(root, "config", "core.hooksPath", ".githooks")
+    git("config", "core.hooksPath", ".githooks", cwd=root)
 
 
 def _mark_policy_reviewed(root: Path) -> None:

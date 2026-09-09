@@ -79,25 +79,25 @@ def test_report_task_file_skips_fast_lane() -> None:
 
 
 def test_changed_files_lists_triple_dot_diff(git_repo: Path) -> None:
-    git(git_repo, "commit", "--allow-empty", "-m", "base")
-    git(git_repo, "checkout", "-b", "feat")
+    git("commit", "--allow-empty", "-m", "base", cwd=git_repo)
+    git("checkout", "-b", "feat", cwd=git_repo)
     (git_repo / "README.md").write_text("hi\n", encoding="utf-8")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-m", "readme")
+    git("add", "-A", cwd=git_repo)
+    git("commit", "-m", "readme", cwd=git_repo)
     assert changed_files(git_repo, "main") == ["README.md"]
 
 
 def test_cmd_ci_checks_mixed_control_and_src(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    git(git_repo, "commit", "--allow-empty", "-m", "base")
-    git(git_repo, "checkout", "-b", "feat")
+    git("commit", "--allow-empty", "-m", "base", cwd=git_repo)
+    git("checkout", "-b", "feat", cwd=git_repo)
     (git_repo / ".ai").mkdir()
     (git_repo / ".ai" / "policy.yml").write_text("x\n", encoding="utf-8")
     (git_repo / "src" / "orders").mkdir(parents=True)
     (git_repo / "src" / "orders" / "service.py").write_text("x\n", encoding="utf-8")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-m", "mixed")
+    git("add", "-A", cwd=git_repo)
+    git("commit", "-m", "mixed", cwd=git_repo)
     monkeypatch.setattr("devflow.cli.repo_root", lambda: git_repo)
     monkeypatch.chdir(git_repo)
     assert _cmd_ci_checks(base="main") == 1
@@ -110,7 +110,7 @@ def test_cmd_ci_checks_mixed_control_and_src(
 def test_cmd_ci_checks_empty_diff(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    git(git_repo, "commit", "--allow-empty", "-m", "base")
+    git("commit", "--allow-empty", "-m", "base", cwd=git_repo)
     monkeypatch.setattr("devflow.cli.repo_root", lambda: git_repo)
     monkeypatch.chdir(git_repo)
     assert _cmd_ci_checks(base="main") == 0
@@ -123,7 +123,7 @@ def test_cmd_ci_checks_empty_diff(
 def test_cmd_ci_checks_missing_base(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    git(git_repo, "commit", "--allow-empty", "-m", "base")
+    git("commit", "--allow-empty", "-m", "base", cwd=git_repo)
     monkeypatch.chdir(git_repo)
     assert _cmd_ci_checks(base="origin/main") == 1
     assert capsys.readouterr().err

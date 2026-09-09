@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Projeye göre düzenleyin.
+# Isolated worktree env so tests exercise this checkout, not the main
+# repo's editable install.
+set -o igncr 2>/dev/null || true
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+if command -v python3 >/dev/null 2>&1; then
+  PY=python3
+else
+  PY=python
+fi
+
+"${PY}" -m venv .venv
+
+if [[ -x .venv/Scripts/python.exe ]]; then
+  VENV_PY=.venv/Scripts/python.exe
+elif [[ -x .venv/Scripts/python ]]; then
+  VENV_PY=.venv/Scripts/python
+elif [[ -x .venv/bin/python ]]; then
+  VENV_PY=.venv/bin/python
+else
+  echo "error: venv python not found" >&2
+  exit 1
+fi
+
+"${VENV_PY}" -m pip install -e ".[dev]"

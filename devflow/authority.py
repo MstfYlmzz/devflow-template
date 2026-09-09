@@ -42,6 +42,8 @@ CONTROL_PATHS: list[str] = [
     ".ai/**",
     "scripts/verify",
     "scripts/verify.d/**",
+    # Isolated worktree venv setup; skipping it silently tests the main checkout.
+    "scripts/setup-worktree",
     ".github/workflows/**",
     ".githooks/**",
     # In this repo, devflow's own source is part of the control mechanism
@@ -58,6 +60,8 @@ CONTROL_PATHS: list[str] = [
     # .gitignore is part of the control mechanism: it keeps lock files,
     # worktrees, and local config unversioned. Removing a line can leak secrets.
     ".gitignore",
+    # Line endings for bash scripts; CRLF breaks `set -euo pipefail` / `exit 1`.
+    ".gitattributes",
 ]
 
 _ALLOWED_WITH_CONTROL: tuple[str, ...] = (

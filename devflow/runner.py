@@ -78,6 +78,10 @@ class RunnerError(Exception):
     """A start/stop/cancel precondition failed."""
 
 
+class WorktreeSetupError(Exception):
+    """scripts/setup-worktree failed after the worktree was created."""
+
+
 @dataclass
 class StartResult:
     task_id: int
@@ -222,21 +226,58 @@ def cancel(repo: Path, task_id: int, reason: str, discard: bool = False) -> Star
     return StartResult(task_id, State.CANCELLED, kept, None, None, messages)
 
 
-def run_verify(worktree: Path) -> tuple[bool, str]:
-    script = worktree / "scripts" / "verify"
-    if not script.is_file():
-        return False, "scripts/verify not found"
-    argv = [str(script)]
+def _worktree_script_argv(relative: str) -> list[str]:
+    rel = relative.replace("\\", "/")
     if os.name == "nt":
-        argv = ["bash", str(script)]
-    result = subprocess.run(
-        argv,
+        return ["bash", rel]
+    return [f"./{rel}"]
+
+
+def _run_worktree_script(
+    worktree: Path, relative: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        _worktree_script_argv(relative),
         cwd=worktree,
+        shell=False,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def run_verify(worktree: Path) -> tuple[bool, str]:
+    script = worktree / "scripts" / "verify"
+    if not script.is_file():
+        return False, "scripts/verify not found"
+    result = _run_worktree_script(worktree, "scripts/verify")
     return result.returncode == 0, f"{result.stdout}{result.stderr}"
+
+
+def run_setup_worktree(worktree: Path) -> None:
+    script = worktree / "scripts" / "setup-worktree"
+    if not script.is_file():
+        return
+    result = _run_worktree_script(worktree, "scripts/setup-worktree")
+    if result.returncode != 0:
+        output = f"{result.stdout}{result.stderr}".strip() or "setup-worktree failed"
+        raise WorktreeSetupError(output)
+
+
+def _emit_verify_result(
+    path: Path,
+    messages: list[str],
+    task_id: int,
+    passed: bool,
+    verify_out: str,
+) -> None:
+    _emit(messages, task_id, f"verify... {'PASS' if passed else 'FAIL'}")
+    if not passed:
+        _emit(messages, task_id, "--- verify output (last 20 lines) ---")
+        for line in verify_out.splitlines()[-20:]:
+            _emit(messages, task_id, line)
+        _emit(messages, task_id, "---")
+    append_section(path, "Verify", verify_out.strip() or "(no output)")
 
 
 def _run_locked(
@@ -340,7 +381,10 @@ def _implement_onward(
     task_id = tf.frontmatter.id
     title = tf.frontmatter.title
     timeout = _timeout(policy)
-    worktree = _ensure_worktree(repo, task_id, title, messages)
+    try:
+        worktree = _ensure_worktree(repo, task_id, title, messages)
+    except WorktreeSetupError as exc:
+        return _setup_worktree_blocked(path, tf, decision, messages, exc)
 
     prompt = build_prompt(
         "implementer",
@@ -371,8 +415,7 @@ def _implement_onward(
         return StartResult(task_id, State.BLOCKED, worktree, None, None, messages)
 
     passed, verify_out = run_verify(worktree)
-    _emit(messages, task_id, f"verify... {'PASS' if passed else 'FAIL'}")
-    append_section(path, "Verify", verify_out.strip() or "(no output)")
+    _emit_verify_result(path, messages, task_id, passed, verify_out)
     if not passed:
         _apply(path, State.IMPLEMENTING, Trigger.VERIFY_FAILED, decision, messages)
         return StartResult(task_id, State.IMPLEMENTING, worktree, False, None, messages)
@@ -390,8 +433,7 @@ def _implement_onward(
     _emit(messages, task_id, f"rebase onto {BASE_REF}... clean")
 
     passed, verify_out = run_verify(worktree)
-    _emit(messages, task_id, f"verify... {'PASS' if passed else 'FAIL'}")
-    append_section(path, "Verify", verify_out.strip() or "(no output)")
+    _emit_verify_result(path, messages, task_id, passed, verify_out)
     if not passed:
         _apply(path, State.IMPLEMENTING, Trigger.VERIFY_FAILED, decision, messages)
         return StartResult(task_id, State.IMPLEMENTING, worktree, False, None, messages)
@@ -456,7 +498,10 @@ def _write_plan(
     messages: list[str],
 ) -> StartResult | tuple[TaskFile, Path]:
     task_id = tf.frontmatter.id
-    worktree = _ensure_worktree(repo, task_id, tf.frontmatter.title, messages)
+    try:
+        worktree = _ensure_worktree(repo, task_id, tf.frontmatter.title, messages)
+    except WorktreeSetupError as exc:
+        return _setup_worktree_blocked(path, tf, decision, messages, exc)
     role_root = worktree if (worktree / ".ai" / "roles").is_dir() else repo
     prompt = build_prompt(
         "implementer",
@@ -497,9 +542,34 @@ def _ensure_worktree(repo: Path, task_id: int, title: str, messages: list[str]) 
     rel = worktree.resolve().relative_to(repo.resolve()).as_posix()
     if resume.worktree_exists:
         _emit(messages, task_id, f"worktree {rel} (existing)")
-    else:
-        _emit(messages, task_id, f"worktree {rel}")
+        return worktree
+    _emit(messages, task_id, f"worktree {rel}")
+    try:
+        run_setup_worktree(worktree)
+    except WorktreeSetupError:
+        gitops.remove_task_worktree(repo, task_id)
+        raise
     return worktree
+
+
+def _setup_worktree_blocked(
+    path: Path,
+    tf: TaskFile,
+    decision: RoutingDecision,
+    messages: list[str],
+    exc: WorktreeSetupError,
+) -> StartResult:
+    task_id = tf.frontmatter.id
+    _emit(messages, task_id, "setup-worktree... FAIL")
+    append_section(path, "Worktree setup", str(exc) or "setup-worktree failed")
+    _block(
+        path,
+        State(tf.frontmatter.state),
+        "SETUP_WORKTREE_FAILED",
+        decision,
+        messages,
+    )
+    return StartResult(task_id, State.BLOCKED, None, None, None, messages)
 
 
 def _record_floor(path: Path, tf: TaskFile, policy: dict[str, Any]) -> TaskFile:

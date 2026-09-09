@@ -70,12 +70,12 @@ def test_sanitized_env_keeps_path_from_os(monkeypatch: pytest.MonkeyPatch) -> No
 def test_load_policy_from_base_ignores_worktree(git_repo: Path) -> None:
     repo = git_repo
     _write_policy(repo, "base-A")
-    git(repo, "add", ".ai/policy.yml")
-    git(repo, "commit", "-m", "base policy")
-    git(repo, "checkout", "-b", "topic")
+    git("add", ".ai/policy.yml", cwd=repo)
+    git("commit", "-m", "base policy", cwd=repo)
+    git("checkout", "-b", "topic", cwd=repo)
     _write_policy(repo, "branch-B")
-    git(repo, "add", ".ai/policy.yml")
-    git(repo, "commit", "-m", "weaken policy")
+    git("add", ".ai/policy.yml", cwd=repo)
+    git("commit", "-m", "weaken policy", cwd=repo)
     loaded = load_policy_from_base(repo, base_ref="main")
     assert loaded["marker"] == "base-A"
     worktree = yaml.safe_load((repo / ".ai" / "policy.yml").read_text(encoding="utf-8"))
@@ -94,8 +94,8 @@ def test_load_policy_from_base_rejects_invalid_policy(git_repo: Path) -> None:
     path = git_repo / ".ai" / "policy.yml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(policy), encoding="utf-8")
-    git(git_repo, "add", ".ai/policy.yml")
-    git(git_repo, "commit", "-m", "invalid policy")
+    git("add", ".ai/policy.yml", cwd=git_repo)
+    git("commit", "-m", "invalid policy", cwd=git_repo)
     with pytest.raises(RuntimeError, match="policy at main is invalid") as exc:
         load_policy_from_base(git_repo, base_ref="main")
     message = str(exc.value)
@@ -105,8 +105,8 @@ def test_load_policy_from_base_rejects_invalid_policy(git_repo: Path) -> None:
 
 def test_load_policy_from_base_accepts_valid_policy(git_repo: Path) -> None:
     _write_policy(git_repo, "ok")
-    git(git_repo, "add", ".ai/policy.yml")
-    git(git_repo, "commit", "-m", "valid policy")
+    git("add", ".ai/policy.yml", cwd=git_repo)
+    git("commit", "-m", "valid policy", cwd=git_repo)
     loaded = load_policy_from_base(git_repo, base_ref="main")
     assert loaded["marker"] == "ok"
 
@@ -164,6 +164,20 @@ def test_verify_script_with_docs_ok() -> None:
     result = check_control_changes(["scripts/verify", "docs/testing/strategy.md"])
     assert result.ok is True
     assert result.touches_control is True
+
+
+def test_setup_worktree_script_is_control() -> None:
+    result = check_control_changes(["scripts/setup-worktree"])
+    assert result.ok is True
+    assert result.touches_control is True
+    assert is_control_change(["scripts/setup-worktree"]) is True
+
+
+def test_gitattributes_is_control() -> None:
+    result = check_control_changes([".gitattributes"])
+    assert result.ok is True
+    assert result.touches_control is True
+    assert is_control_change([".gitattributes"]) is True
 
 
 def test_no_control_files_ok() -> None:
@@ -262,3 +276,5 @@ def test_control_paths_include_github_workflows() -> None:
     assert "templates/project/**" in CONTROL_PATHS
     assert "templates/project/.ai/**" not in CONTROL_PATHS
     assert ".gitignore" in CONTROL_PATHS
+    assert ".gitattributes" in CONTROL_PATHS
+    assert "scripts/setup-worktree" in CONTROL_PATHS
