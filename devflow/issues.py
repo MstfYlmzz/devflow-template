@@ -34,11 +34,14 @@ def fetch_issue(repo: Path, issue_id: int) -> GitHubIssue:
             argv,
             cwd=repo,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="strict",
             check=False,
         )
     except FileNotFoundError as exc:
         raise RuntimeError("GitHub CLI not found") from exc
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("gh issue view returned non-UTF-8 output") from exc
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip() or "gh issue view failed"

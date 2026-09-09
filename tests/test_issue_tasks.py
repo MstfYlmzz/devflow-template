@@ -68,6 +68,7 @@ def _stub_gh(
     stderr: str = "",
     returncode: int = 0,
     missing: bool = False,
+    capture_kwargs: list[dict[str, object]] | None = None,
 ) -> None:
     real_run = subprocess.run
 
@@ -77,10 +78,14 @@ def _stub_gh(
     ) -> subprocess.CompletedProcess[str]:
         if not argv or argv[0] != "gh":
             return real_run(argv, **kwargs)
+        if capture_kwargs is not None:
+            capture_kwargs.append(dict(kwargs))
         if missing:
             raise FileNotFoundError("gh")
         assert argv[:3] == ["gh", "issue", "view"]
-        stdout = json.dumps(payload or {}) if returncode == 0 else ""
+        stdout = (
+            json.dumps(payload or {}, ensure_ascii=False) if returncode == 0 else ""
+        )
         return subprocess.CompletedProcess(
             argv, returncode, stdout=stdout, stderr=stderr
         )
@@ -146,6 +151,54 @@ def test_fetch_issue_parses_open_issue(
     assert issue.title == "Add cancellation guard"
     assert "duplicate" in issue.body
     assert issue.state == "OPEN"
+
+
+def test_fetch_issue_uses_utf8_strict_decoding(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, object]] = []
+    _stub_gh(
+        monkeypatch,
+        payload={
+            "number": 27,
+            "title": "t",
+            "body": "b",
+            "state": "OPEN",
+        },
+        capture_kwargs=seen,
+    )
+    fetch_issue(git_repo, 27)
+    assert seen
+    assert seen[0].get("encoding") == "utf-8"
+    assert seen[0].get("errors") == "strict"
+    assert seen[0].get("text") is not True
+
+
+def test_fetch_issue_preserves_turkish_unicode(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    title = "Özellikle kontrol path coverage"
+    body = (
+        "CONTROL_PATHS listesi daha önce birkaç kez CI hataları üzerinden "
+        "genişletildi. Değerlendir."
+    )
+    _stub_gh(
+        monkeypatch,
+        payload={
+            "number": 24,
+            "title": title,
+            "body": body,
+            "state": "OPEN",
+        },
+    )
+    issue = fetch_issue(git_repo, 24)
+    assert issue.title == title
+    assert issue.body == body
+    assert "önce birkaç kez" in issue.body
+    assert "genişletildi" in issue.body
+    assert "Özellikle" in issue.title
+    assert "Ã¶" not in issue.body
+    assert "Ä±" not in issue.body
 
 
 def test_new_issue_materializes_in_worktree_only(
