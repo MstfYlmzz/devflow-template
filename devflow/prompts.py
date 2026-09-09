@@ -47,7 +47,13 @@ def _triage_context(task: TaskFile, extra: dict[str, Any]) -> list[str]:
     lines = ["", "## Issue", task.body.strip() or "(none)"]
     needed = extra.get("needed")
     if needed:
-        lines.extend(["", f"Needed fields: {', '.join(needed)}"])
+        lines.extend(
+            [
+                "",
+                f"Fields requiring fresh assessment: {', '.join(needed)}",
+                "Return the complete triage schema regardless of this focus list.",
+            ]
+        )
     return lines
 
 

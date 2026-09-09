@@ -13,6 +13,22 @@ Classify the change. Do not implement. Do not modify files.
 
 Emit only a YAML document. Write nothing else.
 
+Always emit the complete YAML schema shown below.
+
+If Devflow provides a list of fields requiring fresh assessment, use that list
+to focus your analysis, but still return every output field.
+
+The complete response must always include:
+
+- `signals.transaction_change`
+- `signals.concurrency_sensitive`
+- `signals.architecture_boundary_change`
+- `signals.unfamiliar_area`
+- `complexity`
+- `architecture_impact`
+- `uncertain`
+- `reasons`
+
 Allowed values (choose exactly one scalar for each):
 
 - `complexity`: `LOW`, `MEDIUM`, or `HIGH`
@@ -40,5 +56,4 @@ reasons:
 
 - Do not produce a risk level. Policy computes risk.
 - If you are unsure, set `uncertain: true`. Do not guess.
-- If only missing fields were requested, emit only those fields.
 - Prefer quoting `YES` as `"YES"` so YAML does not treat it as a boolean.
