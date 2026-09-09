@@ -38,8 +38,8 @@ def _dead_pid() -> int:
 
 
 def _origin_main(repo: Path) -> None:
-    sha = git(repo, "rev-parse", "HEAD").stdout.strip()
-    git(repo, "update-ref", "refs/remotes/origin/main", sha)
+    sha = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+    git("update-ref", "refs/remotes/origin/main", sha, cwd=repo)
 
 
 def _seed(repo: Path) -> None:
@@ -59,8 +59,8 @@ def _seed(repo: Path) -> None:
     (repo / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
     (repo / "docs" / "requirements").mkdir(parents=True)
     (repo / "docs" / "adr").mkdir(parents=True)
-    git(repo, "add", "-A")
-    git(repo, "commit", "-m", "base")
+    git("add", "-A", cwd=repo)
+    git("commit", "-m", "base", cwd=repo)
     _origin_main(repo)
 
 
@@ -186,8 +186,8 @@ def test_policy_comes_from_origin_main(
     base = policy_path.read_text(encoding="utf-8")
     weakened = base.replace("HIGH: codex", "HIGH: cursor")
     policy_path.write_text(weakened, encoding="utf-8")
-    git(project, "add", "-A")
-    git(project, "commit", "-m", "weaken")
+    git("add", "-A", cwd=project)
+    git("commit", "-m", "weaken", cwd=project)
     _task(
         project,
         risk_proposed=Risk.LOW,
@@ -656,13 +656,13 @@ def test_run_setup_worktree_failure_raises(tmp_path: Path) -> None:
 def test_setup_worktree_failure_blocks(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    git(project, "config", "core.autocrlf", "false")
+    git("config", "core.autocrlf", "false", cwd=project)
     _write_exec(
         project / "scripts" / "setup-worktree",
         "#!/usr/bin/env bash\necho setup-boom >&2\nexit 1\n",
     )
-    git(project, "add", "-A")
-    git(project, "commit", "-m", "add setup-worktree")
+    git("add", "-A", cwd=project)
+    git("commit", "-m", "add setup-worktree", cwd=project)
     _origin_main(project)
     path = _task(
         project,

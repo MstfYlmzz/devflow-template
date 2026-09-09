@@ -10,23 +10,23 @@ from tests.conftest import git
 def test_rebase_onto_base_returns_new_head(git_repo: Path) -> None:
     repo = git_repo
     (repo / "base.txt").write_text("main\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-m", "main")
-    git(repo, "checkout", "-b", "task")
+    git("add", "-A", cwd=repo)
+    git("commit", "-m", "main", cwd=repo)
+    git("checkout", "-b", "task", cwd=repo)
     (repo / "feature.txt").write_text("task\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-m", "task")
-    git(repo, "checkout", "main")
+    git("add", "-A", cwd=repo)
+    git("commit", "-m", "task", cwd=repo)
+    git("checkout", "main", cwd=repo)
     (repo / "moved.txt").write_text("moved\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    git(repo, "commit", "-m", "main moved")
-    git(repo, "checkout", "task")
-    old = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git("add", "-A", cwd=repo)
+    git("commit", "-m", "main moved", cwd=repo)
+    git("checkout", "task", cwd=repo)
+    old = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
     new = rebase_onto_base(repo, "main")
     assert new != old
     assert (repo / "feature.txt").is_file()
     assert (repo / "moved.txt").is_file()
-    log = git(repo, "log", "--oneline").stdout
+    log = git("log", "--oneline", cwd=repo).stdout
     assert "main moved" in log
 
 
@@ -58,16 +58,16 @@ def test_inspect_resume_missing_worktree(git_repo: Path) -> None:
 
 def test_inspect_resume_uncommitted_files(git_repo: Path) -> None:
     (git_repo / "README").write_text("base\n", encoding="utf-8")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-m", "base")
+    git("add", "-A", cwd=git_repo)
+    git("commit", "-m", "base", cwd=git_repo)
     worktree = git_repo / ".devflow" / "worktrees" / "task-184"
     git(
-        git_repo,
         "worktree",
         "add",
         "-b",
         "task/184-order-cancel",
         str(worktree),
+        cwd=git_repo,
     )
     (worktree / "dirty.txt").write_text("n\n", encoding="utf-8")
     ctx = inspect_resume(184, git_repo)
@@ -79,8 +79,8 @@ def test_inspect_resume_uncommitted_files(git_repo: Path) -> None:
 
 def test_inspect_resume_plain_directory_ignores_parent_repo(git_repo: Path) -> None:
     (git_repo / "README").write_text("base\n", encoding="utf-8")
-    git(git_repo, "add", "-A")
-    git(git_repo, "commit", "-m", "base")
+    git("add", "-A", cwd=git_repo)
+    git("commit", "-m", "base", cwd=git_repo)
     (git_repo / "parent-only.py").write_text("x\n", encoding="utf-8")
     worktree = git_repo / ".devflow" / "worktrees" / "task-184"
     worktree.mkdir(parents=True)
