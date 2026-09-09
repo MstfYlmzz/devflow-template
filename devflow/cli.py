@@ -54,7 +54,15 @@ from devflow.policy import (
     needed_triage_fields,
     validate_policy,
 )
-from devflow.runner import RunnerError, StartResult, approve, cancel, start, stop
+from devflow.runner import (
+    RunnerError,
+    StartResult,
+    approve,
+    cancel,
+    resume,
+    start,
+    stop,
+)
 from devflow.states import (
     InvalidTransition,
     State,
@@ -966,6 +974,36 @@ def _cmd_approve(
     return _start_exit(result)
 
 
+def _cmd_resume(
+    *,
+    task_id: int,
+    risk_arg: str | None,
+    skip_review: bool,
+    review: str | None,
+    reason: str | None,
+) -> int:
+    hint: Risk | None = None
+    if risk_arg:
+        try:
+            hint = Risk(risk_arg.strip().upper())
+        except ValueError:
+            print(f"invalid risk: {risk_arg}", file=sys.stderr)
+            return 2
+    try:
+        result = resume(
+            repo_root(),
+            task_id,
+            risk_hint=hint,
+            skip_review=skip_review,
+            review_advisory=review == "advisory",
+            reason=reason,
+        )
+    except (RunnerError, OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return _start_exit(result)
+
+
 def _cmd_stop(*, task_id: int) -> int:
     try:
         stop(repo_root(), task_id)
@@ -1061,6 +1099,13 @@ def main() -> None:
     approve_parser.add_argument("--review", choices=["advisory"], default=None)
     approve_parser.add_argument("--reason", default=None)
 
+    resume_parser = sub.add_parser("resume")
+    resume_parser.add_argument("task_id", type=int, metavar="id")
+    resume_parser.add_argument("--risk", default=None)
+    resume_parser.add_argument("--skip-review", action="store_true")
+    resume_parser.add_argument("--review", choices=["advisory"], default=None)
+    resume_parser.add_argument("--reason", default=None)
+
     stop_parser = sub.add_parser("stop")
     stop_parser.add_argument("task_id", type=int, metavar="id")
 
@@ -1114,6 +1159,16 @@ def main() -> None:
     if args.command == "approve":
         raise SystemExit(
             _cmd_approve(
+                task_id=args.task_id,
+                risk_arg=args.risk,
+                skip_review=args.skip_review,
+                review=args.review,
+                reason=args.reason,
+            )
+        )
+    if args.command == "resume":
+        raise SystemExit(
+            _cmd_resume(
                 task_id=args.task_id,
                 risk_arg=args.risk,
                 skip_review=args.skip_review,
