@@ -842,9 +842,16 @@ def _run_triage(
     if result.status is AgentStatus.BLOCKED:
         tf = _block(path, State.TRIAGE, "AGENT_BLOCKED", decision, messages)
         return tf, decision
-    signals, complexity, architecture_impact, uncertain = parse_triage_output(
-        result.output
-    )
+    try:
+        signals, complexity, architecture_impact, uncertain = parse_triage_output(
+            result.output
+        )
+    except RunnerError as exc:
+        append_section(path, "Triage output error", str(exc))
+        append_section(path, "Triage raw output", _truncate_agent_output(result.output))
+        tf = _block(path, State.TRIAGE, "TRIAGE_INVALID_OUTPUT", decision, messages)
+        _emit(messages, task_id, "blocked: TRIAGE_INVALID_OUTPUT")
+        return tf, decision
     tf = update_frontmatter(
         path,
         signals=signals,
@@ -1044,26 +1051,86 @@ def parse_triage_output(
 ) -> tuple[TriageSignals, Complexity, ArchitectureImpact, bool]:
     chunks = [match.group(1) for match in _FENCE_RE.finditer(output)]
     raw = chunks[0] if chunks else output
-    data = yaml.safe_load(raw)
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise RunnerError(f"invalid triage output: YAML parse failed ({exc})") from exc
     if not isinstance(data, dict):
         raise RunnerError("triage output is not a YAML mapping")
-    signals_raw = data.get("signals") or {}
+    signals_raw = data.get("signals")
     if not isinstance(signals_raw, dict):
-        raise RunnerError("triage signals must be a mapping")
+        raise RunnerError("invalid triage signals: must be a mapping")
+    required_signals = (
+        "transaction_change",
+        "concurrency_sensitive",
+        "architecture_boundary_change",
+        "unfamiliar_area",
+    )
+    missing = [name for name in required_signals if name not in signals_raw]
+    if missing:
+        raise RunnerError("invalid triage signals: missing " + ", ".join(missing))
     signals = TriageSignals(
-        transaction_change=bool(signals_raw.get("transaction_change", False)),
-        concurrency_sensitive=bool(signals_raw.get("concurrency_sensitive", False)),
-        architecture_boundary_change=bool(
-            signals_raw.get("architecture_boundary_change", False)
+        transaction_change=_parse_triage_bool(
+            signals_raw["transaction_change"], "signals.transaction_change"
         ),
-        unfamiliar_area=bool(signals_raw.get("unfamiliar_area", False)),
+        concurrency_sensitive=_parse_triage_bool(
+            signals_raw["concurrency_sensitive"], "signals.concurrency_sensitive"
+        ),
+        architecture_boundary_change=_parse_triage_bool(
+            signals_raw["architecture_boundary_change"],
+            "signals.architecture_boundary_change",
+        ),
+        unfamiliar_area=_parse_triage_bool(
+            signals_raw["unfamiliar_area"], "signals.unfamiliar_area"
+        ),
     )
-    complexity = Complexity(str(data.get("complexity", "MEDIUM")).strip().upper())
-    architecture_impact = ArchitectureImpact(
-        str(data.get("architecture_impact", "NONE")).strip().upper()
-    )
-    uncertain = bool(data.get("uncertain", False))
+    if "complexity" not in data:
+        raise RunnerError("invalid triage complexity: missing")
+    if "architecture_impact" not in data:
+        raise RunnerError("invalid triage architecture_impact: missing")
+    if "uncertain" not in data:
+        raise RunnerError("invalid triage uncertain: missing")
+    complexity = _parse_triage_complexity(data["complexity"])
+    architecture_impact = _parse_triage_architecture_impact(data["architecture_impact"])
+    uncertain = _parse_triage_bool(data["uncertain"], "uncertain")
     return signals, complexity, architecture_impact, uncertain
+
+
+def _parse_triage_bool(value: object, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise RunnerError(
+        f"invalid triage {field}: expected YAML boolean true/false, got {value!r}"
+    )
+
+
+def _parse_triage_complexity(value: object) -> Complexity:
+    if isinstance(value, bool) or value is None:
+        raise RunnerError(f"invalid triage complexity: {value!r}")
+    text = str(value).strip().upper()
+    try:
+        return Complexity(text)
+    except ValueError as exc:
+        raise RunnerError(f"invalid triage complexity: {value}") from exc
+
+
+def _parse_triage_architecture_impact(value: object) -> ArchitectureImpact:
+    # PyYAML 1.1 may load unquoted YES as boolean True.
+    if value is True:
+        return ArchitectureImpact.YES
+    if isinstance(value, bool) or value is None:
+        raise RunnerError(f"invalid triage architecture_impact: {value!r}")
+    text = str(value).strip().upper()
+    try:
+        return ArchitectureImpact(text)
+    except ValueError as exc:
+        raise RunnerError(f"invalid triage architecture_impact: {value}") from exc
+
+
+def _truncate_agent_output(text: str, limit: int = 8000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...[truncated]...\n"
 
 
 def _run_agent(
