@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from devflow.capabilities import ProviderCapabilities
+from devflow.cli import _cmd_start, _interactive_runtime_selector
 from devflow.policy import Complexity
+from devflow.runner import StartResult
 from devflow.runtime import RuntimeChoice, RuntimeSelection, recommended_effort
+from devflow.states import State
 
 
 def test_recommended_effort_uses_complexity_not_risk() -> None:
@@ -21,3 +25,80 @@ def test_runtime_selection_is_role_based_without_provider_authority() -> None:
     assert not hasattr(choice, "provider")
     with pytest.raises(ValueError, match="unknown runtime role"):
         selection.for_role("merger")
+
+
+def test_interactive_configuration_never_offers_provider_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    providers = {
+        "triage": "codex",
+        "implementer": "codex",
+        "reviewer": "claude",
+    }
+    capabilities = {
+        "codex": ProviderCapabilities(
+            "codex",
+            "codex",
+            True,
+            True,
+            ("gpt-fast",),
+            ("low", "medium", "high"),
+            True,
+            True,
+        ),
+        "claude": ProviderCapabilities(
+            "claude",
+            "claude",
+            True,
+            True,
+            ("sonnet", "opus"),
+            ("low", "medium", "high", "xhigh"),
+            True,
+            True,
+        ),
+    }
+    recommended = RuntimeSelection(
+        triage=RuntimeChoice(effort="medium"),
+        implementer=RuntimeChoice(effort="high"),
+        reviewer=RuntimeChoice(effort="high"),
+    )
+    answers = iter(["c", "1", "low", "gpt-code", "high", "2", "xhigh"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    selected = _interactive_runtime_selector(
+        object(),  # type: ignore[arg-type]
+        providers,
+        recommended,
+        capabilities,
+    )
+    assert selected.triage == RuntimeChoice(model="gpt-fast", effort="low")
+    assert selected.implementer == RuntimeChoice(model="gpt-code", effort="high")
+    assert selected.reviewer == RuntimeChoice(model="opus", effort="xhigh")
+
+
+def test_noninteractive_start_never_reads_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("devflow.cli.sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("devflow.cli.sys.stdout.isatty", lambda: False)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("input called")),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_start(*args: object, **kwargs: object) -> StartResult:
+        captured.update(kwargs)
+        return StartResult(1, State.READY_TO_MERGE, None, True, None)
+
+    monkeypatch.setattr("devflow.cli.repo_root", lambda: object())
+    monkeypatch.setattr("devflow.cli.start", fake_start)
+    code = _cmd_start(
+        task_id=1,
+        risk_arg=None,
+        skip_review=False,
+        review=None,
+        reason=None,
+        dry_run=False,
+    )
+    assert code == 0
+    assert captured["runtime_selector"] is None

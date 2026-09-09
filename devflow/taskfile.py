@@ -29,6 +29,7 @@ from devflow.policy import (
     TriageSignals,
     apply_floor,
 )
+from devflow.runtime import RUNTIME_ROLES, RuntimeChoice, RuntimeSelection
 
 DocImpactStatus = Literal["none", "updated", "adr_required"]
 EnumT = TypeVar("EnumT", bound=enum.Enum)
@@ -75,6 +76,7 @@ class TaskFrontmatter:
     blocked_from: str | None
     blocked_reason: str | None
     review_records: list[ReviewRecord]
+    runtime_selection: RuntimeSelection | None
 
 
 @dataclass
@@ -253,6 +255,7 @@ def create(
     blocked_from: str | None = None,
     blocked_reason: str | None = None,
     review_records: list[ReviewRecord] | None = None,
+    runtime_selection: RuntimeSelection | None = None,
     body: str = "",
 ) -> TaskFile:
     if path.exists():
@@ -278,6 +281,7 @@ def create(
         blocked_from=redact(blocked_from) if blocked_from is not None else None,
         blocked_reason=redact(blocked_reason) if blocked_reason is not None else None,
         review_records=list(review_records or []),
+        runtime_selection=runtime_selection,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     _write(path, fm, redact(body) if body else "")
@@ -392,6 +396,7 @@ def _parse_frontmatter(data: dict[str, object]) -> TaskFrontmatter:
         blocked_from=_opt_str(data.get("blocked_from")),
         blocked_reason=_opt_str(data.get("blocked_reason")),
         review_records=_parse_review_records(data.get("review_records")),
+        runtime_selection=_parse_runtime_selection(data.get("runtime_selection")),
     )
 
 
@@ -504,12 +509,45 @@ def _parse_review_records(raw: object) -> list[ReviewRecord]:
     return records
 
 
+def _parse_runtime_selection(raw: object) -> RuntimeSelection | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("runtime_selection must be a mapping")
+    unknown = sorted(str(key) for key in raw if str(key) not in RUNTIME_ROLES)
+    if unknown:
+        raise ValueError(f"unknown frontmatter key: runtime_selection.{unknown[0]}")
+
+    def choice(role: str) -> RuntimeChoice:
+        value = raw.get(role)
+        if value is None:
+            return RuntimeChoice()
+        if not isinstance(value, dict):
+            raise ValueError(f"runtime_selection.{role} must be a mapping")
+        extra = sorted(str(key) for key in value if str(key) not in {"model", "effort"})
+        if extra:
+            raise ValueError(
+                f"unknown frontmatter key: runtime_selection.{role}.{extra[0]}"
+            )
+        model = _opt_str(value.get("model"))
+        effort = _opt_str(value.get("effort"))
+        return RuntimeChoice(model=model, effort=effort)
+
+    return RuntimeSelection(
+        triage=choice("triage"),
+        implementer=choice("implementer"),
+        reviewer=choice("reviewer"),
+    )
+
+
 def _yaml_value(value: object) -> object:
     if isinstance(value, (Risk, Complexity, ArchitectureImpact)):
         return value.value
     if isinstance(value, ReviewRecord):
         return dataclasses.asdict(value)
     if isinstance(value, TriageSignals):
+        return dataclasses.asdict(value)
+    if isinstance(value, (RuntimeChoice, RuntimeSelection)):
         return dataclasses.asdict(value)
     if isinstance(value, list):
         return [_yaml_value(item) for item in value]
@@ -560,11 +598,29 @@ def _redact_str_list(values: list[str]) -> list[str]:
 def _redact_value(value: object) -> object:
     if isinstance(value, ReviewRecord):
         return value
+    if isinstance(value, RuntimeChoice):
+        return RuntimeChoice(
+            model=redact(value.model) if value.model is not None else None,
+            effort=redact(value.effort) if value.effort is not None else None,
+        )
+    if isinstance(value, RuntimeSelection):
+        return RuntimeSelection(
+            triage=_redact_runtime_choice(value.triage),
+            implementer=_redact_runtime_choice(value.implementer),
+            reviewer=_redact_runtime_choice(value.reviewer),
+        )
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, list):
         return [_redact_value(item) for item in value]
     return value
+
+
+def _redact_runtime_choice(value: RuntimeChoice) -> RuntimeChoice:
+    return RuntimeChoice(
+        model=redact(value.model) if value.model is not None else None,
+        effort=redact(value.effort) if value.effort is not None else None,
+    )
 
 
 def _section_content(body: str, heading: str) -> str | None:

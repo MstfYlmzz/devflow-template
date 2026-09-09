@@ -17,7 +17,7 @@ from devflow.agents import (
     run,
 )
 from devflow.authority import load_policy_from_base
-from devflow.capabilities import discover_all
+from devflow.capabilities import ProviderCapabilities, discover_all
 from devflow.ci_checks import changed_files, ci_checks_report, needs_fast_lane
 from devflow.freshness import (
     check_code_freshness,
@@ -65,6 +65,7 @@ from devflow.runner import (
     start,
     stop,
 )
+from devflow.runtime import RUNTIME_ROLES, RuntimeChoice, RuntimeSelection
 from devflow.states import (
     InvalidTransition,
     State,
@@ -974,6 +975,9 @@ def _cmd_start(
             print(f"invalid risk: {risk_arg}", file=sys.stderr)
             return 2
     try:
+        runtime_selector = None
+        if not dry_run and sys.stdin.isatty() and sys.stdout.isatty():
+            runtime_selector = _interactive_runtime_selector
         result = start(
             repo_root(),
             task_id,
@@ -982,11 +986,84 @@ def _cmd_start(
             review_advisory=review == "advisory",
             reason=reason,
             dry_run=dry_run,
+            runtime_selector=runtime_selector,
         )
     except (RunnerError, OSError, ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     return _start_exit(result)
+
+
+def _interactive_runtime_selector(
+    decision: RoutingDecision,
+    providers: dict[str, str],
+    recommended: RuntimeSelection,
+    capabilities: dict[str, ProviderCapabilities],
+) -> RuntimeSelection:
+    _ = decision
+    print()
+    print("AI Runtime")
+    for role in RUNTIME_ROLES:
+        choice = recommended.for_role(role)
+        print(
+            f"  {role:<12}{providers[role]} · "
+            f"{choice.model or 'provider default'} · "
+            f"{choice.effort or 'provider-managed'}"
+        )
+    while True:
+        action = input("Enter  Continue    C  Configure: ").strip().casefold()
+        if not action:
+            return recommended
+        if action == "c":
+            break
+        print("Choose Enter or C.")
+
+    selected: dict[str, RuntimeChoice] = {}
+    for role in RUNTIME_ROLES:
+        provider = providers[role]
+        capability = capabilities[provider]
+        default = recommended.for_role(role)
+        print()
+        print(role.capitalize())
+        print(f"  Provider  {provider} (policy controlled)")
+        if capability.models:
+            print("  Models")
+            for index, listed_model in enumerate(capability.models, start=1):
+                print(f"    {index}. {listed_model}")
+        elif capability.supports_model_override:
+            print(
+                "  Models    catalogue unavailable; enter an exact model or leave blank"
+            )
+        else:
+            print("  Model     provider default (override unavailable)")
+        model: str | None = default.model
+        if capability.supports_model_override:
+            raw_model = input("  Model [provider default]: ").strip()
+            if raw_model:
+                if raw_model.isdigit() and capability.models:
+                    index = int(raw_model)
+                    if not 1 <= index <= len(capability.models):
+                        raise ValueError(
+                            f"invalid {provider} model choice: {raw_model}"
+                        )
+                    model = capability.models[index - 1]
+                else:
+                    model = raw_model
+
+        effort = default.effort
+        if capability.efforts:
+            shown = "/".join(capability.efforts)
+            raw_effort = input(
+                f"  Effort [{effort or 'provider-managed'}] ({shown}): "
+            ).strip()
+            if raw_effort:
+                if raw_effort not in capability.efforts:
+                    raise ValueError(f"unsupported {provider} effort: {raw_effort}")
+                effort = raw_effort
+        else:
+            print("  Effort    provider-managed")
+        selected[role] = RuntimeChoice(model=model, effort=effort)
+    return RuntimeSelection(**selected)
 
 
 def _cmd_approve(

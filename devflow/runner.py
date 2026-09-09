@@ -31,6 +31,7 @@ from devflow.authority import (
     load_policy_from_base,
     sanitized_env,
 )
+from devflow.capabilities import ProviderCapabilities, discover_provider
 from devflow.ci_checks import changed_files
 from devflow.freshness import ReviewRecord
 from devflow.issues import GitHubIssue, fetch_issue
@@ -56,6 +57,12 @@ from devflow.policy import (
 )
 from devflow.prompts import build_prompt
 from devflow.review import parse_findings
+from devflow.runtime import (
+    RUNTIME_ROLES,
+    RuntimeChoice,
+    RuntimeSelection,
+    recommended_effort,
+)
 from devflow.states import (
     State,
     Trigger,
@@ -79,6 +86,15 @@ from devflow.taskfile import (
 
 BASE_REF = "origin/main"
 _FENCE_RE = re.compile(r"```(?:yaml)?\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+RuntimeSelector = Callable[
+    [
+        RoutingDecision,
+        dict[str, str],
+        RuntimeSelection,
+        dict[str, ProviderCapabilities],
+    ],
+    RuntimeSelection,
+]
 
 
 class RunnerError(Exception):
@@ -108,6 +124,7 @@ def start(
     reason: str | None = None,
     dry_run: bool = False,
     after_approval: bool = False,
+    runtime_selector: RuntimeSelector | None = None,
 ) -> StartResult:
     if dry_run:
         return _dry_run_entry(
@@ -168,6 +185,7 @@ def start(
             reason,
             after_approval,
             messages,
+            runtime_selector,
         )
     finally:
         if acquired:
@@ -257,6 +275,7 @@ def resume(
             ),
         )
         _require_bypass_reason(decision, skip_review, review_advisory, reason)
+        tf = _ensure_runtime_selection(path, tf, decision, policy, messages, None)
 
         if current is State.REVIEW:
             return _resume_review(
@@ -570,6 +589,7 @@ def _ephemeral_task_from_issue(issue: GitHubIssue) -> TaskFile:
             blocked_from=None,
             blocked_reason=None,
             review_records=[],
+            runtime_selection=None,
         ),
         body=f"# Task {issue.number} — {issue.title}\n\n## Issue\n\n{body}\n",
         path=Path(f"<issue:{issue.number}>"),
@@ -632,6 +652,7 @@ def _run_locked(
     reason: str | None,
     after_approval: bool,
     messages: list[str],
+    runtime_selector: RuntimeSelector | None,
 ) -> StartResult:
     task_id = tf.frontmatter.id
     if after_approval:
@@ -688,6 +709,9 @@ def _run_locked(
                 messages,
             )
 
+    tf = _ensure_runtime_selection(
+        path, tf, decision, policy, messages, runtime_selector
+    )
     worktree: Path | None = gitops.task_worktree(repo, task_id)
     if worktree is not None and not worktree.is_dir():
         worktree = None
@@ -752,6 +776,7 @@ def _implement_onward(
         AgentMode.EDIT,
         timeout,
         path,
+        _runtime_choice(tf, "implementer", decision.implementer, decision),
     )
     _emit_agent_result(
         messages, task_id, "implementer", decision.implementer, AgentMode.EDIT, result
@@ -1054,6 +1079,7 @@ def _write_plan(
         AgentMode.READ_ONLY,
         _timeout(policy),
         path,
+        _runtime_choice(tf, "implementer", decision.implementer, decision),
     )
     _emit_agent_result(
         messages,
@@ -1163,6 +1189,7 @@ def _run_triage(
             AgentMode.READ_ONLY,
             _timeout(policy),
             path,
+            _runtime_choice(tf, "triage", agent, decision),
         )
     _emit_agent_result(messages, task_id, "triage", agent, AgentMode.READ_ONLY, result)
     if result.status is not AgentStatus.OK:
@@ -1226,7 +1253,15 @@ def _run_review(
     try:
         review_wt = gitops.add_review_worktree(repo, task_id, round_no, head_sha)
         result = _run_agent(
-            repo, task_id, "claude", prompt, review_wt, AgentMode.REVIEW, timeout, path
+            repo,
+            task_id,
+            "claude",
+            prompt,
+            review_wt,
+            AgentMode.REVIEW,
+            timeout,
+            path,
+            _runtime_choice(tf, "reviewer", "claude", decision),
         )
         _emit_agent_result(
             messages, task_id, "reviewer", "claude", AgentMode.REVIEW, result
@@ -1489,6 +1524,7 @@ def _run_agent(
     mode: AgentMode,
     timeout: float,
     task_path: Path,
+    runtime: RuntimeChoice,
 ) -> AgentResult:
     prompt_file = _write_prompt(prompt)
     activity = _terminal_activity(task_id, f"{agent} {mode.value}")
@@ -1508,6 +1544,8 @@ def _run_agent(
             env=sanitized_env(),
             on_spawn=on_spawn,
             on_activity=activity,
+            model=runtime.model,
+            effort=runtime.effort,
         )
     finally:
         set_agent_pid(task_id, repo, None)
@@ -1635,6 +1673,140 @@ def _timeout(policy: dict[str, Any]) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return 20.0
+
+
+def _runtime_providers(
+    decision: RoutingDecision, policy: dict[str, Any]
+) -> dict[str, str]:
+    return {
+        "triage": triage_provider(policy),
+        "implementer": decision.implementer,
+        # Independent review is intentionally fixed to Claude in V1.
+        "reviewer": "claude",
+    }
+
+
+def _runtime_capabilities(
+    providers: dict[str, str],
+) -> dict[str, ProviderCapabilities]:
+    return {
+        provider: discover_provider(provider)
+        for provider in dict.fromkeys(providers.values())
+    }
+
+
+def _recommended_runtime(
+    decision: RoutingDecision,
+    providers: dict[str, str],
+    capabilities: dict[str, ProviderCapabilities],
+) -> RuntimeSelection:
+    choices: dict[str, RuntimeChoice] = {}
+    for role in RUNTIME_ROLES:
+        capability = capabilities[providers[role]]
+        recommended = recommended_effort(decision.complexity, role)
+        effort = recommended if recommended in capability.efforts else None
+        choices[role] = RuntimeChoice(effort=effort)
+    return RuntimeSelection(**choices)
+
+
+def _ensure_runtime_selection(
+    path: Path,
+    tf: TaskFile,
+    decision: RoutingDecision,
+    policy: dict[str, Any],
+    messages: list[str],
+    selector: RuntimeSelector | None,
+) -> TaskFile:
+    providers = _runtime_providers(decision, policy)
+    capabilities = _runtime_capabilities(providers)
+    selection = tf.frontmatter.runtime_selection
+    if selection is None:
+        selection = _recommended_runtime(decision, providers, capabilities)
+        if selector is not None:
+            selection = selector(decision, providers, selection, capabilities)
+        tf = update_frontmatter(path, runtime_selection=selection)
+    selection = _applicable_runtime(
+        tf.frontmatter.id, selection, providers, capabilities, messages
+    )
+    if selection != tf.frontmatter.runtime_selection:
+        tf = update_frontmatter(path, runtime_selection=selection)
+    _emit(messages, tf.frontmatter.id, "AI runtime")
+    for role in RUNTIME_ROLES:
+        choice = selection.for_role(role)
+        model = choice.model or "provider default"
+        effort = choice.effort or "provider-managed"
+        _emit(
+            messages,
+            tf.frontmatter.id,
+            f"  {role}: {providers[role]} · {model} · {effort}",
+        )
+    return tf
+
+
+def _applicable_runtime(
+    task_id: int,
+    selection: RuntimeSelection,
+    providers: dict[str, str],
+    capabilities: dict[str, ProviderCapabilities],
+    messages: list[str],
+) -> RuntimeSelection:
+    choices: dict[str, RuntimeChoice] = {}
+    for role in RUNTIME_ROLES:
+        provider = providers[role]
+        capability = capabilities[provider]
+        choice = selection.for_role(role)
+        model = choice.model
+        effort = choice.effort
+        if model is not None and _obviously_incompatible_model(provider, model):
+            _emit(
+                messages,
+                task_id,
+                (
+                    f"WARNING — stored {role} model {model!r} is incompatible "
+                    f"with policy provider {provider}; using provider default"
+                ),
+            )
+            model = None
+        if effort is not None and effort not in capability.efforts:
+            _emit(
+                messages,
+                task_id,
+                (
+                    f"WARNING — stored {role} effort {effort!r} is unsupported "
+                    f"by {provider}; using provider-managed effort"
+                ),
+            )
+            effort = None
+        choices[role] = RuntimeChoice(model=model, effort=effort)
+    return RuntimeSelection(**choices)
+
+
+def _obviously_incompatible_model(provider: str, model: str) -> bool:
+    lowered = model.casefold()
+    if provider == "claude":
+        return lowered.startswith(("gpt-", "o1", "o3", "o4"))
+    if provider == "codex":
+        return lowered.startswith("claude-") or lowered in {
+            "fable",
+            "opus",
+            "sonnet",
+            "haiku",
+        }
+    return provider == "cursor"
+
+
+def _runtime_choice(
+    tf: TaskFile,
+    role: str,
+    provider: str,
+    decision: RoutingDecision,
+) -> RuntimeChoice:
+    selection = tf.frontmatter.runtime_selection
+    if selection is not None:
+        return selection.for_role(role)
+    capability = discover_provider(provider)
+    effort = recommended_effort(decision.complexity, role)
+    return RuntimeChoice(effort=effort if effort in capability.efforts else None)
 
 
 def _emit(messages: list[str], task_id: int, line: str) -> None:
