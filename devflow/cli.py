@@ -432,10 +432,48 @@ _SMOKE_PROMPT = "fix the bug"
 def _cmd_agent_smoke(*, agent: str) -> int:
     with tempfile.TemporaryDirectory(prefix="devflow-smoke-") as tmp:
         worktree = Path(tmp)
+        # Codex (and similar CLIs) refuse non-git directories unless
+        # --skip-git-repo-check is set; keep production flags strict and make
+        # the smoke tree a real repo instead.
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "smoke@devflow.local"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Devflow Smoke"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         target = worktree / "add.py"
         target.write_text(_SMOKE_SOURCE, encoding="utf-8")
         prompt_file = worktree / "prompt.txt"
         prompt_file.write_text(_SMOKE_PROMPT, encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "smoke base"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
 
         run(agent, prompt_file, worktree, AgentMode.READ_ONLY)
         read_only_ok = (

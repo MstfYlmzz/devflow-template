@@ -12,6 +12,7 @@ from devflow.agents import (
     AgentMode,
     AgentStatus,
     _build_command,
+    _defined_modes,
     run,
     run_with_retry,
     terminate_tree,
@@ -307,6 +308,85 @@ def test_cursor_command_has_no_mode_flags(
     for mode in AgentMode:
         argv = _build_command("cursor", mode, "fix the bug")
         assert argv == ["cursor-agent"]
+
+
+def test_codex_read_only_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVFLOW_CODEX_CMD", "codex")
+    prompt = "inspect the tree"
+    argv = _build_command("codex", AgentMode.READ_ONLY, prompt)
+    assert argv == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--color",
+        "never",
+        prompt,
+    ]
+    assert "--approve-for-me" not in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "danger-full-access" not in argv
+
+
+def test_codex_edit_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVFLOW_CODEX_CMD", "codex")
+    prompt = "fix the bug"
+    argv = _build_command("codex", AgentMode.EDIT, prompt)
+    assert argv == [
+        "codex",
+        "exec",
+        "--approve-for-me",
+        "--ephemeral",
+        "--color",
+        "never",
+        prompt,
+    ]
+    # Codex 0.153.4 rejects --sandbox together with --approve-for-me;
+    # --approve-for-me already applies workspace-write.
+    assert "--sandbox" not in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "danger-full-access" not in argv
+
+
+def test_codex_defined_modes() -> None:
+    assert _defined_modes("codex") == (AgentMode.READ_ONLY, AgentMode.EDIT)
+    assert AgentMode.REVIEW not in _defined_modes("codex")
+
+
+def test_codex_review_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVFLOW_CODEX_CMD", "codex")
+    with pytest.raises(ValueError, match="codex does not support mode review"):
+        _build_command("codex", AgentMode.REVIEW, "review this")
+
+
+def test_claude_defined_modes_unchanged() -> None:
+    assert _defined_modes("claude") == (
+        AgentMode.READ_ONLY,
+        AgentMode.EDIT,
+        AgentMode.REVIEW,
+    )
+
+
+def test_claude_review_matches_edit_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVFLOW_CLAUDE_CMD", "claude")
+    edit = _build_command("claude", AgentMode.EDIT, "fix the bug")
+    review = _build_command("claude", AgentMode.REVIEW, "fix the bug")
+    assert edit == review
+    assert edit is not None
+    assert "acceptEdits" in edit
+
+
+def test_codex_argv_never_includes_dangerous_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CODEX_CMD", "codex")
+    for mode in (AgentMode.READ_ONLY, AgentMode.EDIT):
+        argv = _build_command("codex", mode, "prompt")
+        assert argv is not None
+        joined = " ".join(argv)
+        assert "--dangerously-bypass-approvals-and-sandbox" not in joined
+        assert "danger-full-access" not in joined
 
 
 def test_dangerously_skip_permissions_absent() -> None:

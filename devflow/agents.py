@@ -81,10 +81,48 @@ def _claude_mode_flags(mode: AgentMode, prompt: str) -> list[str]:
     ]
 
 
+def _codex_mode_flags(mode: AgentMode, prompt: str) -> list[str]:
+    """Build Codex CLI flags for non-interactive implementer modes.
+
+    Codex is an implementer only (READ_ONLY / EDIT). REVIEW is fail-closed —
+    Claude remains the reviewer. Never use danger-full-access or
+    --dangerously-bypass-approvals-and-sandbox.
+
+    EDIT uses --approve-for-me alone: Codex 0.153.4 rejects combining it with
+    --sandbox, and --approve-for-me already applies the workspace-write sandbox
+    while auto-reviewing approval prompts (needed for non-interactive runs).
+    """
+    if mode is AgentMode.READ_ONLY:
+        return [
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--ephemeral",
+            "--color",
+            "never",
+            prompt,
+        ]
+    if mode is AgentMode.EDIT:
+        return [
+            "exec",
+            "--approve-for-me",
+            "--ephemeral",
+            "--color",
+            "never",
+            prompt,
+        ]
+    raise ValueError(
+        f"codex does not support mode {mode.value} "
+        "(supported: read_only, edit; reviewer remains claude)"
+    )
+
+
 def _mode_flags(agent: str, mode: AgentMode, prompt: str) -> list[str]:
     if agent == "claude":
         return _claude_mode_flags(mode, prompt)
-    # TODO: cursor and codex mode flags are not known yet.
+    if agent == "codex":
+        return _codex_mode_flags(mode, prompt)
+    # TODO: cursor mode flags are not known yet.
     return []
 
 
@@ -93,6 +131,8 @@ def _defined_modes(agent: str) -> tuple[AgentMode, ...]:
         raise ValueError(f"unknown agent: {agent}")
     if agent == "claude":
         return (AgentMode.READ_ONLY, AgentMode.EDIT, AgentMode.REVIEW)
+    if agent == "codex":
+        return (AgentMode.READ_ONLY, AgentMode.EDIT)
     return ()
 
 
@@ -246,6 +286,7 @@ def run(
     timeout_seconds = timeout_minutes * 60
     popen_kwargs: dict[str, object] = {
         "cwd": worktree,
+        "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
