@@ -422,3 +422,118 @@ def test_terminate_tree_kills_sleeping_process() -> None:
         assert proc.returncode is not None
     finally:
         proc.wait(timeout=5)
+
+
+def test_successful_output_is_stdout_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    _set_cursor(
+        monkeypatch,
+        _script(
+            tmp_path,
+            "split.py",
+            (
+                "import sys\n"
+                "sys.stdout.buffer.write(b'FINAL ANSWER\\n')\n"
+                "sys.stderr.buffer.write(b'OpenAI Codex...\\n')\n"
+                "sys.stderr.buffer.write(b'gh pr merge\\n')\n"
+                "sys.stderr.buffer.write(b'git push\\n')\n"
+            ),
+        ),
+    )
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
+    assert result.status is AgentStatus.OK
+    assert result.output == "FINAL ANSWER\n"
+    assert "OpenAI Codex" not in result.output
+    assert "gh pr merge" not in result.output
+    assert "git push" not in result.output
+
+
+def test_failure_classifies_stderr_not_merged_into_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    _set_cursor(
+        monkeypatch,
+        _script(
+            tmp_path,
+            "fail.py",
+            (
+                "import sys\n"
+                "sys.stdout.buffer.write(b'partial\\n')\n"
+                "sys.stderr.buffer.write(b'rate limit exceeded\\n')\n"
+                "sys.exit(1)\n"
+            ),
+        ),
+    )
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
+    assert result.status is AgentStatus.RETRY
+    assert result.output == "partial\n"
+    assert result.detail is not None
+    assert "rate limit" in result.detail.casefold()
+
+
+def test_run_preserves_utf8_unicode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    text = "önce birkaç kez\ndeğerlendir\ngenişletildi\nTRIAGE → PLAN_APPROVAL\n"
+    _set_cursor(
+        monkeypatch,
+        _script(
+            tmp_path,
+            "utf8.py",
+            (
+                "import sys\n"
+                f"sys.stdout.buffer.write({text.encode('utf-8')!r})\n"
+                "sys.stdout.buffer.flush()\n"
+            ),
+        ),
+    )
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
+    assert result.status is AgentStatus.OK
+    assert result.output == text
+    assert "Ã¶" not in result.output
+    assert "Ä±" not in result.output
+
+
+def test_invalid_utf8_agent_output_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    _set_cursor(
+        monkeypatch,
+        _script(
+            tmp_path,
+            "badbytes.py",
+            (
+                "import sys\n"
+                "sys.stdout.buffer.write(b'\\xff\\xfe not utf-8')\n"
+                "sys.stdout.buffer.flush()\n"
+            ),
+        ),
+    )
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
+    assert result.status is AgentStatus.BLOCKED
+    assert result.output == ""
+    assert result.detail == "agent output is not valid UTF-8"
+
+
+def test_unicode_decode_error_from_communicate_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    _set_cursor(monkeypatch, _script(tmp_path, "noop.py", "print('x')\n"))
+
+    class _FakeProc:
+        pid = 0
+        returncode = 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            return b"\xff\xfe", b""
+
+    monkeypatch.setattr("devflow.agents.subprocess.Popen", lambda *a, **k: _FakeProc())
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
+    assert result.status is AgentStatus.BLOCKED
+    assert result.detail == "agent output is not valid UTF-8"
