@@ -314,7 +314,7 @@ def append_section(path: Path, heading: str, content: str) -> TaskFile:
 
 
 def read_doc_impact(tf: TaskFile) -> DocImpact | None:
-    section = _section_content(tf.body, "Doc impact")
+    section = _latest_section_content(tf.body, "Doc impact")
     if section is None:
         return None
     raw = yaml.safe_load(section) if section.strip() else None
@@ -578,3 +578,18 @@ def _section_content(body: str, heading: str) -> str | None:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
         return body[start:end]
     return None
+
+
+def _latest_section_content(body: str, heading: str) -> str | None:
+    """Return the last matching section body, or None if absent."""
+    matches = list(_HEADING_RE.finditer(body))
+    latest: str | None = None
+    for index, match in enumerate(matches):
+        if match.group(1).strip() != heading:
+            continue
+        start = match.end()
+        if start < len(body) and body[start] == "\n":
+            start += 1
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        latest = body[start:end]
+    return latest

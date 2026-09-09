@@ -267,6 +267,31 @@ def test_doc_impact_missing_section(tmp_path: Path) -> None:
     assert read_doc_impact(tf) is None
 
 
+def test_doc_impact_latest_valid_supersedes_invalid(tmp_path: Path) -> None:
+    path = _path(tmp_path)
+    create(path, 1, "t")
+    append_section(path, "Doc impact", "Status: none\n")
+    before = path.read_text(encoding="utf-8")
+    assert "Status: none" in before
+    tf = append_section(path, "Doc impact", "status: none\nfiles: []\n")
+    after = path.read_text(encoding="utf-8")
+    assert "Status: none" in after
+    assert after.startswith(before.rstrip("\n")) or before in after
+    impact = read_doc_impact(tf)
+    assert impact is not None
+    assert impact.status == "none"
+    assert impact.files == []
+
+
+def test_doc_impact_latest_invalid_does_not_fallback(tmp_path: Path) -> None:
+    path = _path(tmp_path)
+    create(path, 1, "t")
+    append_section(path, "Doc impact", "status: none\nfiles: []\n")
+    tf = append_section(path, "Doc impact", "Status: none\n")
+    with pytest.raises(ValueError, match="invalid Doc impact"):
+        read_doc_impact(tf)
+
+
 def test_implementer_doc_impact_role_contract(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     root_text = (root / ".ai" / "roles" / "implementer.md").read_text(encoding="utf-8")
