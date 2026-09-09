@@ -267,6 +267,35 @@ def test_doc_impact_missing_section(tmp_path: Path) -> None:
     assert read_doc_impact(tf) is None
 
 
+def test_implementer_doc_impact_role_contract(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    root_text = (root / ".ai" / "roles" / "implementer.md").read_text(encoding="utf-8")
+    template_text = (
+        root / "templates" / "project" / ".ai" / "roles" / "implementer.md"
+    ).read_text(encoding="utf-8")
+    assert root_text == template_text
+    assert "status: follow-up" not in root_text
+    assert "status: none" in root_text
+    assert "status: updated" in root_text
+    assert "status: adr_required" in root_text
+    assert "lowercase" in root_text.casefold()
+    assert "Status must be one of" not in root_text
+    assert "do not use `follow-up`" in root_text.casefold()
+
+    for index, section in enumerate(
+        (
+            "status: none\nfiles: []\n",
+            "status: adr_required\nfiles: []\nadr: ADR-XXX\n",
+        )
+    ):
+        path = _path(tmp_path, f"role-{index}.md")
+        create(path, index + 10, "t")
+        tf = append_section(path, "Doc impact", section)
+        impact = read_doc_impact(tf)
+        assert impact is not None
+        assert impact.status in {"none", "adr_required"}
+
+
 def test_decision_inputs_with_epic_proposal(tmp_path: Path) -> None:
     path = _path(tmp_path)
     tf = create(

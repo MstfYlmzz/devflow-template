@@ -23,8 +23,29 @@ Complexity determines plan depth through Devflow policy via the supplied
 - After every change, run `./scripts/verify`. Do not finish if it fails.
 - Read `.devflow/tasks/<id>.md`. Append new notes to the body. Do not
   edit existing lines.
-- Fill the Doc impact section. Status must be one of: `none`, `updated`,
-  `follow-up`.
+- Fill the Doc impact section. Use this exact YAML shape. The key `status`
+  must be lowercase. Do not use `follow-up`.
+
+```yaml
+## Doc impact
+
+status: none
+files: []
+```
+
+Allowed `status` values:
+
+- `status: none`
+- `status: updated`
+- `status: adr_required`
+
+When an ADR is required:
+
+```yaml
+status: adr_required
+files: []
+adr: ADR-XXX
+```
 
 ## Risk escalation
 

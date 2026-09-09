@@ -81,6 +81,17 @@ def commit_all(worktree: Path, message: str) -> str:
     return git_output(worktree, "rev-parse", "HEAD")
 
 
+def commit_paths(worktree: Path, message: str, *paths: str) -> str:
+    """Stage and commit only the given paths (relative to worktree)."""
+    if not paths:
+        return git_output(worktree, "rev-parse", "HEAD")
+    git_output(worktree, "add", "--", *paths)
+    porcelain = git_output(worktree, "status", "--porcelain", "--", *paths)
+    if porcelain.strip():
+        git_output(worktree, "commit", "-m", message)
+    return git_output(worktree, "rev-parse", "HEAD")
+
+
 def ensure_task_worktree(repo: Path, task_id: int, title: str, base_ref: str) -> Path:
     path = task_worktree(repo, task_id)
     if path.is_dir():

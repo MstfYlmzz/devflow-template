@@ -392,7 +392,7 @@ def test_unverified_high_does_not_rework(
     assert result.review_record is not None
     assert result.review_record.unverified_high == 1
     assert result.review_record.blocking_findings == 0
-    assert any("merge gate: blocked" in item for item in result.messages)
+    assert any("merge readiness: blocked" in item for item in result.messages)
 
 
 def test_existing_worktree_is_reused(
@@ -827,3 +827,124 @@ def test_verify_failure_prints_last_20_lines(
     tf = read(_active(project))
     for row in rows:
         assert row in tf.body
+
+
+def _review_status_agent(
+    task_file_path: Path, review_status: AgentStatus, detail: str | None = None
+):
+    base = _ok_agent(task_file_path)
+
+    def run(
+        agent: str,
+        prompt_file: Path,
+        worktree: Path,
+        mode: AgentMode,
+        **kwargs: object,
+    ) -> AgentResult:
+        if mode is AgentMode.REVIEW:
+            return AgentResult(review_status, "", detail, 0.2)
+        return base(agent, prompt_file, worktree, mode, **kwargs)
+
+    return run
+
+
+def test_blocked_reviewer_fail_closed(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(project, **_epic())
+    monkeypatch.setattr(
+        "devflow.agents.run",
+        _review_status_agent(path, AgentStatus.BLOCKED, "quota unavailable"),
+    )
+    result = start(project, 184)
+    assert result.final_state is State.BLOCKED
+    assert result.review_record is None
+    tf = read(_active(project))
+    assert tf.frontmatter.blocked_reason == "REVIEWER_UNAVAILABLE"
+    assert tf.frontmatter.review_records == []
+    assert "READY_TO_MERGE" not in tf.body
+    assert "## Review error" in tf.body
+    assert "status: blocked" in tf.body
+    assert "quota unavailable" in tf.body
+    assert not (project / ".devflow" / "worktrees" / "review-184-r1").exists()
+    branches = git("branch", "--list", "review/184-r1", cwd=project).stdout
+    assert branches.strip() == ""
+    seen = [
+        item
+        for item in result.messages
+        if "reviewer" in item or "Codex" in item or "codex" in item
+    ]
+    assert any("reviewer (claude, review)" in item for item in result.messages)
+    assert not any("codex" in item.casefold() for item in seen)
+
+
+def test_retry_reviewer_fail_closed(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(project, **_epic())
+    monkeypatch.setattr(
+        "devflow.agents.run",
+        _review_status_agent(path, AgentStatus.RETRY, "usage limit"),
+    )
+    result = start(project, 184)
+    assert result.final_state is State.BLOCKED
+    assert result.review_record is None
+    tf = read(_active(project))
+    assert tf.frontmatter.blocked_reason == "REVIEWER_UNAVAILABLE"
+    assert tf.frontmatter.review_records == []
+    assert not any("merge readiness: open" in item for item in result.messages)
+
+
+def test_successful_reviewer_clean_path(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(project, **_epic())
+    monkeypatch.setattr("devflow.agents.run", _ok_agent(path, "[]"))
+    result = start(project, 184)
+    assert result.final_state is State.READY_TO_MERGE
+    assert result.review_record is not None
+    assert result.review_record.blocking_findings == 0
+    assert any("merge readiness: open" in item for item in result.messages)
+    assert any("merge gate... OK" in item for item in result.messages)
+
+
+def test_ready_to_merge_commits_final_journal(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from devflow.freshness import check_code_freshness
+
+    path = _task(project, **_epic())
+    monkeypatch.setattr("devflow.agents.run", _ok_agent(path, "[]"))
+    result = start(project, 184)
+    assert result.final_state is State.READY_TO_MERGE
+    assert result.worktree is not None
+    wt = result.worktree
+    porcelain = git("status", "--porcelain", cwd=wt).stdout.strip()
+    assert porcelain == ""
+    head = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
+    journal = git("show", f"{head}:.devflow/tasks/184.md", cwd=wt).stdout
+    assert "state: READY_TO_MERGE" in journal
+    assert "review_records:" in journal
+    assert "review_clean" in journal
+    assert "READY_TO_MERGE" in journal
+    record = result.review_record
+    assert record is not None
+    assert record.head_sha != head
+    base = git("rev-parse", "origin/main", cwd=wt).stdout.strip()
+    freshness = check_code_freshness(wt, record, head, base)
+    assert freshness.fresh is True
+    msg = git("log", "-1", "--format=%s", cwd=wt).stdout.strip()
+    assert msg == "Finalize task 184 journal"
+
+
+def test_merge_readiness_lists_blockers(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(project, **_epic())
+    findings = "```yaml\nid: F1\nseverity: HIGH\nproblem: maybe\n```\n"
+    monkeypatch.setattr("devflow.agents.run", _ok_agent(path, findings))
+    result = start(project, 184)
+    joined = "\n".join(result.messages)
+    assert "merge readiness: blocked (" in joined
+    assert "  - " in joined
+    assert any(item.strip().startswith("184:   - ") for item in result.messages)
