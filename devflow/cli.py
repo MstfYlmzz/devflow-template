@@ -17,6 +17,7 @@ from devflow.agents import (
     run,
 )
 from devflow.authority import load_policy_from_base
+from devflow.capabilities import discover_all
 from devflow.ci_checks import changed_files, ci_checks_report, needs_fast_lane
 from devflow.freshness import (
     check_code_freshness,
@@ -432,6 +433,41 @@ def _cmd_agent_check() -> int:
             )
             missing = True
     return 1 if missing else 0
+
+
+def _cmd_models(*, refresh: bool) -> int:
+    # Discovery is deliberately uncached in V1; --refresh is accepted so adding
+    # a cache later will not require a CLI contract change.
+    _ = refresh
+    for index, capabilities in enumerate(discover_all()):
+        if index:
+            print()
+        print(capabilities.provider.upper())
+        print(f"  {'CLI':<12}{capabilities.command or '(not configured)'}")
+        print(f"  {'configured':<12}{'yes' if capabilities.configured else 'no'}")
+        print(f"  {'available':<12}{'yes' if capabilities.available else 'no'}")
+        print()
+        print("  models")
+        if capabilities.models:
+            for model in capabilities.models:
+                print(f"    {model}")
+        elif capabilities.supports_model_override:
+            print("    catalogue unavailable (provider default)")
+        else:
+            print("    model override unavailable")
+        print()
+        print("  effort")
+        if capabilities.efforts:
+            for effort in capabilities.efforts:
+                print(f"    {effort}")
+        elif capabilities.available:
+            print("    provider-managed")
+        else:
+            print("    unavailable")
+        if capabilities.diagnostic:
+            print()
+            print(f"  diagnostic  {capabilities.diagnostic}")
+    return 0
 
 
 _SMOKE_SOURCE = "def add(a, b):\n    return a - b\n"
@@ -1068,6 +1104,8 @@ def main() -> None:
 
     sub.add_parser("doctor")
     sub.add_parser("agent-check")
+    models_parser = sub.add_parser("models")
+    models_parser.add_argument("--refresh", action="store_true")
 
     smoke_parser = sub.add_parser("agent-smoke")
     smoke_parser.add_argument("--agent", required=True, choices=list(COMMANDS))
@@ -1144,6 +1182,8 @@ def main() -> None:
         raise SystemExit(_cmd_ci_checks(base=args.base))
     if args.command == "agent-check":
         raise SystemExit(_cmd_agent_check())
+    if args.command == "models":
+        raise SystemExit(_cmd_models(refresh=args.refresh))
     if args.command == "agent-smoke":
         raise SystemExit(_cmd_agent_smoke(agent=args.agent))
     if args.command == "recover":
