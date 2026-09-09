@@ -18,8 +18,8 @@ from typing import Literal
 
 from devflow.taskfile import atomic_write
 
-Stage = Literal["start", "triage", "implement", "review"]
-_STAGES = {"start", "triage", "implement", "review"}
+Stage = Literal["start", "triage", "implement", "review", "resume"]
+_STAGES = {"start", "triage", "implement", "review", "resume"}
 
 LOCKS_GITIGNORE_LINE = ".devflow/locks/"
 

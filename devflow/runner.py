@@ -191,6 +191,106 @@ def approve(
     )
 
 
+_RESUME_STATES = frozenset({State.IMPLEMENTING, State.REWORK, State.REVIEW})
+
+
+def resume(
+    repo: Path,
+    task_id: int,
+    risk_hint: Risk | None = None,
+    skip_review: bool = False,
+    review_advisory: bool = False,
+    reason: str | None = None,
+) -> StartResult:
+    """Continue IMPLEMENTING / REWORK / REVIEW without re-running implementer."""
+    acquired = False
+    try:
+        try:
+            acquire(task_id, "resume", repo)
+            acquired = True
+        except LockHeld as exc:
+            resolved = resolve_task(repo, task_id, attach=False)
+            state = (
+                State(read(resolved).frontmatter.state)
+                if resolved is not None
+                else State.BACKLOG
+            )
+            return StartResult(task_id, state, None, None, None, [str(exc)])
+        except StaleLock as exc:
+            resolved = resolve_task(repo, task_id, attach=False)
+            state = (
+                State(read(resolved).frontmatter.state)
+                if resolved is not None
+                else State.BACKLOG
+            )
+            return StartResult(
+                task_id,
+                state,
+                None,
+                None,
+                None,
+                [str(exc), f"run: devflow recover {task_id}"],
+            )
+
+        messages: list[str] = []
+        path, tf, worktree = _prepare_resume_context(repo, task_id, messages)
+        current = State(tf.frontmatter.state)
+        if current not in _RESUME_STATES:
+            raise RunnerError(_resume_state_error(task_id, current))
+
+        blockers = _unmerged_blockers(repo, tf)
+        if blockers:
+            listed = ", ".join(str(item) for item in blockers)
+            raise RunnerError(f"blocked by unmerged tasks: {listed}")
+
+        policy = load_policy_from_base(repo, BASE_REF)
+        _emit(messages, task_id, f"policy from {BASE_REF}")
+        decision = _decide(tf, policy, risk_hint)
+        _emit(
+            messages,
+            task_id,
+            (
+                f"risk {decision.risk.value}, complexity {decision.complexity.value}"
+                f" -> {decision.implementer}, plan {decision.plan_detail}"
+            ),
+        )
+        _require_bypass_reason(decision, skip_review, review_advisory, reason)
+
+        if current is State.REVIEW:
+            return _resume_review(
+                repo,
+                path,
+                tf,
+                decision,
+                policy,
+                skip_review,
+                review_advisory,
+                messages,
+                worktree,
+            )
+        commit_message = (
+            f"Implement task {task_id}"
+            if current is State.IMPLEMENTING
+            else f"Rework task {task_id}"
+        )
+        return _post_change_pipeline(
+            repo,
+            path,
+            tf,
+            decision,
+            policy,
+            skip_review,
+            review_advisory,
+            messages,
+            worktree,
+            from_state=current,
+            commit_message=commit_message,
+        )
+    finally:
+        if acquired:
+            release(task_id, repo)
+
+
 def stop(repo: Path, task_id: int) -> StartResult:
     path = resolve_task(repo, task_id)
     if path is None:
@@ -626,13 +726,46 @@ def _implement_onward(
         _block(path, State.IMPLEMENTING, "IMPLEMENTER_UNAVAILABLE", decision, messages)
         return StartResult(task_id, State.BLOCKED, worktree, None, None, messages)
 
+    return _post_change_pipeline(
+        repo,
+        path,
+        tf,
+        decision,
+        policy,
+        skip_review,
+        review_advisory,
+        messages,
+        worktree,
+        from_state=State.IMPLEMENTING,
+        commit_message=f"Implement task {task_id}",
+    )
+
+
+def _post_change_pipeline(
+    repo: Path,
+    path: Path,
+    tf: TaskFile,
+    decision: RoutingDecision,
+    policy: dict[str, Any],
+    skip_review: bool,
+    review_advisory: bool,
+    messages: list[str],
+    worktree: Path,
+    *,
+    from_state: State,
+    commit_message: str,
+) -> StartResult:
+    task_id = tf.frontmatter.id
+    timeout = _timeout(policy)
+
     passed, verify_out = run_verify(worktree)
     _emit_verify_result(path, messages, task_id, passed, verify_out)
     if not passed:
-        _apply(path, State.IMPLEMENTING, Trigger.VERIFY_FAILED, decision, messages)
-        return StartResult(task_id, State.IMPLEMENTING, worktree, False, None, messages)
+        if from_state is State.IMPLEMENTING:
+            _apply(path, State.IMPLEMENTING, Trigger.VERIFY_FAILED, decision, messages)
+        return StartResult(task_id, from_state, worktree, False, None, messages)
 
-    head = gitops.commit_all(worktree, f"Implement task {task_id}")
+    head = gitops.commit_all(worktree, commit_message)
     _emit(messages, task_id, f"commit {_short(head)}")
 
     try:
@@ -640,29 +773,33 @@ def _implement_onward(
     except RuntimeError as exc:
         _emit(messages, task_id, f"rebase onto {BASE_REF}... conflict")
         append_section(path, "Rebase", str(exc))
-        _block(path, State.IMPLEMENTING, "REBASE_CONFLICT", decision, messages)
+        _block(path, from_state, "REBASE_CONFLICT", decision, messages)
         return StartResult(task_id, State.BLOCKED, worktree, True, None, messages)
     _emit(messages, task_id, f"rebase onto {BASE_REF}... clean")
 
     passed, verify_out = run_verify(worktree)
     _emit_verify_result(path, messages, task_id, passed, verify_out)
     if not passed:
-        _apply(path, State.IMPLEMENTING, Trigger.VERIFY_FAILED, decision, messages)
-        return StartResult(task_id, State.IMPLEMENTING, worktree, False, None, messages)
+        if from_state is State.IMPLEMENTING:
+            _apply(path, State.IMPLEMENTING, Trigger.VERIFY_FAILED, decision, messages)
+            return StartResult(
+                task_id, State.IMPLEMENTING, worktree, False, None, messages
+            )
+        return StartResult(task_id, from_state, worktree, False, None, messages)
 
     actual_paths = changed_files(worktree, BASE_REF)
     gate = check_merge_gate(decision, actual_paths, policy)
     if not gate.passed:
         _emit(messages, task_id, "merge gate... FAIL")
-        tf = _apply(
-            path, State.IMPLEMENTING, Trigger.RISK_ESCALATION, decision, messages
-        )
+        tf = _apply(path, from_state, Trigger.RISK_ESCALATION, decision, messages)
         append_section(path, "Merge gate", gate.reason or "raised")
         return StartResult(task_id, State.TRIAGE, worktree, True, None, messages)
     _emit(messages, task_id, "merge gate... OK")
 
     need_review = decision.review_required and not skip_review
-    if not need_review:
+    if from_state is State.REWORK:
+        tf = _apply(path, State.REWORK, Trigger.REWORK_DONE, decision, messages)
+    elif not need_review:
         tf = _apply(
             path, State.IMPLEMENTING, Trigger.IMPLEMENT_DONE, decision, messages
         )
@@ -670,8 +807,118 @@ def _implement_onward(
         return StartResult(
             task_id, State(tf.frontmatter.state), worktree, True, None, messages
         )
+    else:
+        tf = _apply(
+            path, State.IMPLEMENTING, Trigger.IMPLEMENT_DONE, decision, messages
+        )
 
-    tf = _apply(path, State.IMPLEMENTING, Trigger.IMPLEMENT_DONE, decision, messages)
+    if not need_review:
+        # REWORK without review requirement still lands in REVIEW via REWORK_DONE;
+        # skip reviewer and treat as clean readiness from REVIEW.
+        tf = _apply(path, State.REVIEW, Trigger.REVIEW_CLEAN, decision, messages)
+        _ready_report(tf, decision, True, 0, True, gate, messages, worktree)
+        return StartResult(
+            task_id, State(tf.frontmatter.state), worktree, True, None, messages
+        )
+
+    return _finish_review(
+        repo,
+        path,
+        tf,
+        decision,
+        skip_review,
+        review_advisory,
+        messages,
+        worktree,
+        head,
+        timeout,
+        gate,
+    )
+
+
+def _resume_review(
+    repo: Path,
+    path: Path,
+    tf: TaskFile,
+    decision: RoutingDecision,
+    policy: dict[str, Any],
+    skip_review: bool,
+    review_advisory: bool,
+    messages: list[str],
+    worktree: Path,
+) -> StartResult:
+    task_id = tf.frontmatter.id
+    timeout = _timeout(policy)
+
+    passed, verify_out = run_verify(worktree)
+    _emit_verify_result(path, messages, task_id, passed, verify_out)
+    if not passed:
+        return StartResult(task_id, State.REVIEW, worktree, False, None, messages)
+
+    journal = f".devflow/tasks/{task_id}.md"
+    head = gitops.commit_paths(worktree, f"Update task {task_id} journal", journal)
+    _emit(messages, task_id, f"commit {_short(head)}")
+
+    try:
+        head = gitops.rebase_onto_base(worktree, BASE_REF)
+    except RuntimeError as exc:
+        _emit(messages, task_id, f"rebase onto {BASE_REF}... conflict")
+        append_section(path, "Rebase", str(exc))
+        _block(path, State.REVIEW, "REBASE_CONFLICT", decision, messages)
+        return StartResult(task_id, State.BLOCKED, worktree, True, None, messages)
+    _emit(messages, task_id, f"rebase onto {BASE_REF}... clean")
+
+    passed, verify_out = run_verify(worktree)
+    _emit_verify_result(path, messages, task_id, passed, verify_out)
+    if not passed:
+        return StartResult(task_id, State.REVIEW, worktree, False, None, messages)
+
+    actual_paths = changed_files(worktree, BASE_REF)
+    gate = check_merge_gate(decision, actual_paths, policy)
+    if not gate.passed:
+        _emit(messages, task_id, "merge gate... FAIL")
+        tf = _apply(path, State.REVIEW, Trigger.RISK_ESCALATION, decision, messages)
+        append_section(path, "Merge gate", gate.reason or "raised")
+        return StartResult(task_id, State.TRIAGE, worktree, True, None, messages)
+    _emit(messages, task_id, "merge gate... OK")
+
+    if skip_review or not decision.review_required:
+        tf = _apply(path, State.REVIEW, Trigger.REVIEW_CLEAN, decision, messages)
+        _ready_report(tf, decision, True, 0, True, gate, messages, worktree)
+        return StartResult(
+            task_id, State(tf.frontmatter.state), worktree, True, None, messages
+        )
+
+    return _finish_review(
+        repo,
+        path,
+        tf,
+        decision,
+        skip_review,
+        review_advisory,
+        messages,
+        worktree,
+        head,
+        timeout,
+        gate,
+    )
+
+
+def _finish_review(
+    repo: Path,
+    path: Path,
+    tf: TaskFile,
+    decision: RoutingDecision,
+    skip_review: bool,
+    review_advisory: bool,
+    messages: list[str],
+    worktree: Path,
+    head: str,
+    timeout: float,
+    gate: Any,
+) -> StartResult:
+    _ = skip_review
+    task_id = tf.frontmatter.id
     record, tf = _run_review(
         repo, path, tf, worktree, head, timeout, messages, decision
     )
@@ -690,7 +937,7 @@ def _implement_onward(
         _emit(
             messages,
             task_id,
-            (f"next: fix findings in the worktree, then rerun devflow start {task_id}"),
+            f"next: fix findings in the worktree, then run: devflow resume {task_id}",
         )
         _emit(
             messages,
@@ -703,6 +950,41 @@ def _implement_onward(
     return StartResult(
         task_id, State(tf.frontmatter.state), worktree, True, record, messages
     )
+
+
+def _prepare_resume_context(
+    repo: Path, task_id: int, messages: list[str]
+) -> tuple[Path, TaskFile, Path]:
+    worktree = gitops.task_worktree(repo, task_id)
+    if not worktree.is_dir():
+        raise RunnerError(
+            f"RESUME_CONTEXT_MISSING: task {task_id} has no worktree "
+            f"({worktree.as_posix()})"
+        )
+    branch = gitops.task_branch_name(repo, task_id)
+    if not branch:
+        raise RunnerError(f"RESUME_CONTEXT_MISSING: task {task_id} has no task branch")
+    path = task_path(worktree, task_id)
+    if not path.is_file():
+        raise RunnerError(
+            f"RESUME_CONTEXT_MISSING: task {task_id} has no task file in worktree"
+        )
+    _emit(messages, task_id, f"worktree {worktree.relative_to(repo).as_posix()}")
+    return path, read(path), worktree
+
+
+def _resume_state_error(task_id: int, current: State) -> str:
+    hints = {
+        State.BACKLOG: f"use: devflow start {task_id}",
+        State.PLAN_APPROVAL: f"use: devflow approve {task_id}",
+        State.BLOCKED: "resolve the block first",
+        State.READY_TO_MERGE: "task is already ready for merge",
+        State.MERGED: "task is already merged",
+        State.CANCELLED: "task is cancelled",
+        State.TRIAGE: f"task {task_id} is TRIAGE; finish triage before resume",
+    }
+    hint = hints.get(current, "resume supports IMPLEMENTING, REWORK, REVIEW")
+    return f"task {task_id} is {current.value}; {hint}"
 
 
 def _write_plan(

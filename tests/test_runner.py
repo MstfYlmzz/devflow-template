@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -9,7 +10,13 @@ from pathlib import Path
 import pytest
 
 from devflow.agents import AgentMode, AgentResult, AgentStatus
-from devflow.gitops import ensure_task_worktree, inspect_resume, task_worktree
+from devflow.gitops import (
+    ensure_task_worktree,
+    inspect_resume,
+    rebase_onto_base,
+    remove_task_worktree,
+    task_worktree,
+)
 from devflow.lock import acquire, lock_path, read_lock
 from devflow.paths import resolve_task
 from devflow.policy import Complexity, Risk
@@ -20,6 +27,7 @@ from devflow.runner import (
     approve,
     cancel,
     resolve_git_bash,
+    resume,
     run_setup_worktree,
     run_verify,
     start,
@@ -948,3 +956,152 @@ def test_merge_readiness_lists_blockers(
     assert "merge readiness: blocked (" in joined
     assert "  - " in joined
     assert any(item.strip().startswith("184:   - ") for item in result.messages)
+
+
+def _seed_resume_worktree(project: Path, *, state: str) -> Path:
+    main_path = _task(project, state=state, **_epic())
+    wt = ensure_task_worktree(project, 184, "Order cancel", "origin/main")
+    dest = wt / ".devflow" / "tasks" / "184.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(main_path, dest)
+    (wt / "src" / "app.py").write_text("print('implemented')\n", encoding="utf-8")
+    body = read(dest).body
+    if "Doc impact" not in body:
+        append_section(dest, "Doc impact", "status: none\nfiles: []\n")
+    git("add", "-A", cwd=wt)
+    git("commit", "-m", "Implement task 184", cwd=wt)
+    return dest
+
+
+def _counting_agent(task_file_path: Path, review_yaml: str = "[]"):
+    counts = {"edit": 0, "review": 0}
+    base = _ok_agent(task_file_path, review_yaml)
+
+    def run(
+        agent: str,
+        prompt_file: Path,
+        worktree: Path,
+        mode: AgentMode,
+        **kwargs: object,
+    ) -> AgentResult:
+        if mode is AgentMode.EDIT:
+            counts["edit"] += 1
+        if mode is AgentMode.REVIEW:
+            counts["review"] += 1
+        return base(agent, prompt_file, worktree, mode, **kwargs)
+
+    return run, counts
+
+
+def test_resume_implementing_skips_implementer(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _seed_resume_worktree(project, state="IMPLEMENTING")
+    impl_sha = git("rev-parse", "HEAD", cwd=task_worktree(project, 184)).stdout.strip()
+    agent, counts = _counting_agent(path, "[]")
+    monkeypatch.setattr("devflow.agents.run", agent)
+    rebase_calls: list[str] = []
+
+    def wrap_rebase(worktree: Path, base: str) -> str:
+        rebase_calls.append(base)
+        return rebase_onto_base(worktree, base)
+
+    monkeypatch.setattr("devflow.gitops.rebase_onto_base", wrap_rebase)
+    result = resume(project, 184)
+    assert counts["edit"] == 0
+    assert counts["review"] == 1
+    assert rebase_calls == ["origin/main"]
+    assert any("merge gate... OK" in item for item in result.messages)
+    assert any("IMPLEMENTING -> REVIEW" in item for item in result.messages)
+    assert result.final_state is State.READY_TO_MERGE
+    assert result.worktree is not None
+    assert git("status", "--porcelain", cwd=result.worktree).stdout.strip() == ""
+    head = git("rev-parse", "HEAD", cwd=result.worktree).stdout.strip()
+    journal = git("show", f"{head}:.devflow/tasks/184.md", cwd=result.worktree).stdout
+    assert "state: READY_TO_MERGE" in journal
+    log = git("log", "--format=%H", cwd=result.worktree).stdout
+    assert impl_sha in log
+
+
+def test_resume_rework_transitions_to_review(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _seed_resume_worktree(project, state="REWORK")
+    wt = task_worktree(project, 184)
+    (wt / "src" / "app.py").write_text("print('fixed')\n", encoding="utf-8")
+    agent, counts = _counting_agent(path, "[]")
+    monkeypatch.setattr("devflow.agents.run", agent)
+    result = resume(project, 184)
+    assert counts["edit"] == 0
+    assert counts["review"] == 1
+    assert any("REWORK -> REVIEW" in item for item in result.messages)
+    assert result.final_state is State.READY_TO_MERGE
+    assert not any("rerun devflow start" in item for item in result.messages)
+
+
+def test_resume_review_retries_reviewer(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _seed_resume_worktree(project, state="REVIEW")
+    agent, counts = _counting_agent(path, "[]")
+    monkeypatch.setattr("devflow.agents.run", agent)
+    result = resume(project, 184)
+    assert counts["edit"] == 0
+    assert counts["review"] == 1
+    assert result.final_state is State.READY_TO_MERGE
+    assert result.review_record is not None
+
+
+def test_resume_wrong_states_fail_closed(project: Path) -> None:
+    cases = [
+        ("BACKLOG", "use: devflow start 184"),
+        ("PLAN_APPROVAL", "use: devflow approve 184"),
+        ("BLOCKED", "resolve the block first"),
+        ("READY_TO_MERGE", "already ready for merge"),
+        ("MERGED", "already merged"),
+        ("CANCELLED", "cancelled"),
+    ]
+    main_path = project / ".devflow" / "tasks" / "184.md"
+    for state, needle in cases:
+        if main_path.is_file():
+            main_path.unlink()
+        create(main_path, 184, "Order cancel", state=state, **_epic())  # type: ignore[arg-type]
+        wt = ensure_task_worktree(project, 184, "Order cancel", "origin/main")
+        dest = wt / ".devflow" / "tasks" / "184.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(main_path, dest)
+        with pytest.raises(RunnerError, match=needle):
+            resume(project, 184)
+        remove_task_worktree(project, 184)
+        branch = git(
+            "branch", "--list", "task/184-order-cancel", cwd=project
+        ).stdout.strip()
+        if branch:
+            git("branch", "-D", "task/184-order-cancel", cwd=project)
+
+
+def test_resume_missing_worktree_fails(project: Path) -> None:
+    _task(project, state="IMPLEMENTING", **_epic())
+    with pytest.raises(RunnerError, match="RESUME_CONTEXT_MISSING"):
+        resume(project, 184)
+
+
+def test_start_still_backlog_only_after_resume(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _seed_resume_worktree(project, state="IMPLEMENTING")
+    monkeypatch.setattr("devflow.agents.run", _ok_agent(path))
+    with pytest.raises(RunnerError, match="expected BACKLOG"):
+        start(project, 184)
+
+
+def test_blocking_review_points_to_resume(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(project, **_epic())
+    findings = "```yaml\nid: F1\nseverity: HIGH\nevidence: test\nproblem: bug\n```\n"
+    monkeypatch.setattr("devflow.agents.run", _ok_agent(path, findings))
+    result = start(project, 184)
+    assert result.final_state is State.REWORK
+    assert any("run: devflow resume 184" in item for item in result.messages)
+    assert not any("rerun devflow start" in item for item in result.messages)
