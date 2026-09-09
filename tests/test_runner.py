@@ -11,6 +11,7 @@ import pytest
 from devflow.agents import AgentMode, AgentResult, AgentStatus
 from devflow.gitops import ensure_task_worktree, inspect_resume, task_worktree
 from devflow.lock import acquire, lock_path, read_lock
+from devflow.paths import resolve_task
 from devflow.policy import Complexity, Risk
 from devflow.runner import (
     RunnerError,
@@ -70,6 +71,12 @@ def _task(repo: Path, **fields: object) -> Path:
     return path
 
 
+def _active(repo: Path, task_id: int = 184) -> Path:
+    found = resolve_task(repo, task_id)
+    assert found is not None
+    return found
+
+
 def _epic(**fields: object) -> dict[str, object]:
     data: dict[str, object] = {
         "risk_proposed": Risk.MEDIUM,
@@ -80,7 +87,7 @@ def _epic(**fields: object) -> dict[str, object]:
     return data
 
 
-def _ok_agent(task_path: Path, review_yaml: str | None = None):
+def _ok_agent(task_file_path: Path, review_yaml: str | None = None):
     def run(
         agent: str,
         prompt_file: Path,
@@ -96,9 +103,11 @@ def _ok_agent(task_path: Path, review_yaml: str | None = None):
             (worktree / "src" / "app.py").write_text(
                 "print('done')\n", encoding="utf-8"
             )
-            body = read(task_path).body
+            active = worktree / ".devflow" / "tasks" / task_file_path.name
+            target = active if active.is_file() else task_file_path
+            body = read(target).body
             if "Doc impact" not in body:
-                append_section(task_path, "Doc impact", "status: none\nfiles: []\n")
+                append_section(target, "Doc impact", "status: none\nfiles: []\n")
             return AgentResult(AgentStatus.OK, "implemented", None, 1.5)
         if mode is AgentMode.REVIEW:
             output = review_yaml or "[]"
@@ -236,7 +245,7 @@ def test_high_epic_stops_at_plan_approval(
     monkeypatch.setattr("devflow.agents.run", run)
     result = start(project, 184)
     assert result.final_state is State.PLAN_APPROVAL
-    tf = read(project / ".devflow" / "tasks" / "184.md")
+    tf = read(_active(project))
     assert tf.frontmatter.state == "PLAN_APPROVAL"
     assert result.worktree is not None
     assert result.worktree.is_dir()
@@ -258,7 +267,7 @@ def test_start_records_floor_from_module(
     )
     monkeypatch.setattr("devflow.agents.run", _ok_agent(path))
     start(project, 184)
-    tf = read(path)
+    tf = read(_active(project))
     assert tf.frontmatter.floor_risk is Risk.HIGH
     assert tf.frontmatter.floor_matched
     assert any("from module: auth" in item for item in tf.frontmatter.floor_matched)
@@ -287,7 +296,7 @@ def test_agent_blocked_does_not_call_second_provider(
     result = start(project, 184)
     assert seen == ["cursor"]
     assert result.final_state is State.BLOCKED
-    tf = read(project / ".devflow" / "tasks" / "184.md")
+    tf = read(_active(project))
     assert tf.frontmatter.blocked_reason == "IMPLEMENTER_UNAVAILABLE"
 
 
@@ -307,7 +316,7 @@ def test_verify_failure_stays_implementing(
     assert "verify... FAIL" in joined
     assert "--- verify output (last 20 lines) ---" in joined
     assert "boom" in joined
-    tf = read(path)
+    tf = read(_active(project))
     assert "boom" in tf.body
 
 
@@ -323,7 +332,7 @@ def test_rebase_conflict_blocks_and_keeps_worktree(
     monkeypatch.setattr("devflow.gitops.rebase_onto_base", boom)
     result = start(project, 184)
     assert result.final_state is State.BLOCKED
-    tf = read(project / ".devflow" / "tasks" / "184.md")
+    tf = read(_active(project))
     assert tf.frontmatter.blocked_reason == "REBASE_CONFLICT"
     assert result.worktree is not None
     assert result.worktree.is_dir()
@@ -332,7 +341,7 @@ def test_rebase_conflict_blocks_and_keeps_worktree(
 def test_merge_gate_raise_goes_to_triage(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = _task(project, **_epic())
+    _task(project, **_epic())
 
     def run(
         agent: str,
@@ -345,7 +354,8 @@ def test_merge_gate_raise_goes_to_triage(
             auth = worktree / "src" / "auth"
             auth.mkdir(parents=True, exist_ok=True)
             (auth / "login.py").write_text("x = 1\n", encoding="utf-8")
-            append_section(path, "Doc impact", "status: none\nfiles: []\n")
+            active = worktree / ".devflow" / "tasks" / "184.md"
+            append_section(active, "Doc impact", "status: none\nfiles: []\n")
         return AgentResult(AgentStatus.OK, "ok", None, 0.5)
 
     monkeypatch.setattr("devflow.agents.run", run)
@@ -363,7 +373,7 @@ def test_review_records_head_and_base(
     assert result.review_record is not None
     assert result.review_record.head_sha
     assert result.review_record.base_sha
-    tf = read(path)
+    tf = read(_active(project))
     assert tf.frontmatter.review_records
     assert tf.frontmatter.review_records[0].head_sha == result.review_record.head_sha
     assert result.final_state is State.REWORK
@@ -458,7 +468,7 @@ def test_stop_sets_blocked_keeps_worktree(project: Path) -> None:
     acquire(184, "start", project)
     result = stop(project, 184)
     assert result.final_state is State.BLOCKED
-    tf = read(project / ".devflow" / "tasks" / "184.md")
+    tf = read(_active(project))
     assert tf.frontmatter.blocked_reason == "USER_STOPPED"
     assert wt.is_dir()
     assert read_lock(184, project) is None
@@ -469,7 +479,7 @@ def test_cancel_with_reason_keeps_worktree(project: Path) -> None:
     wt = ensure_task_worktree(project, 184, "Order cancel", "origin/main")
     result = cancel(project, 184, reason="out of scope")
     assert result.final_state is State.CANCELLED
-    tf = read(project / ".devflow" / "tasks" / "184.md")
+    tf = read(_active(project))
     assert tf.frontmatter.state == "CANCELLED"
     assert "out of scope" in tf.body
     assert wt.is_dir()
@@ -482,7 +492,7 @@ def test_cancel_discard_removes_worktree_keeps_file(project: Path) -> None:
     cancel(project, 184, reason="drop it", discard=True)
     assert not wt.exists()
     assert (project / ".devflow" / "tasks" / "184.md").is_file()
-    tf = read(project / ".devflow" / "tasks" / "184.md")
+    tf = read(_active(project))
     assert tf.frontmatter.state == "CANCELLED"
 
 
@@ -555,7 +565,7 @@ def test_medium_writes_plan_then_implements(
     assert AgentMode.READ_ONLY in modes
     assert AgentMode.EDIT in modes
     assert modes.index(AgentMode.READ_ONLY) < modes.index(AgentMode.EDIT)
-    tf = read(path)
+    tf = read(_active(project))
     assert "Plan" in body_sections(tf)
     assert "- do the work" in tf.body
 
@@ -585,7 +595,7 @@ def test_low_skips_plan_generation(
     start(project, 184)
     assert AgentMode.READ_ONLY not in modes
     assert AgentMode.EDIT in modes
-    tf = read(path)
+    tf = read(_active(project))
     assert "Plan" not in body_sections(tf)
 
 
@@ -671,13 +681,10 @@ def test_setup_worktree_failure_blocks(
         modules=["src/app.py"],
     )
     monkeypatch.setattr("devflow.agents.run", _ok_agent(path))
-    result = start(project, 184)
-    assert result.final_state is State.BLOCKED
-    tf = read(path)
-    assert tf.frontmatter.blocked_reason == "SETUP_WORKTREE_FAILED"
-    assert "setup-boom" in tf.body
+    with pytest.raises(RunnerError, match="setup-boom"):
+        start(project, 184)
     assert not task_worktree(project, 184).exists()
-    assert any("setup-worktree... FAIL" in item for item in result.messages)
+    assert read(path).frontmatter.state == "BACKLOG"
 
 
 def test_verify_failure_prints_last_20_lines(
@@ -695,6 +702,6 @@ def test_verify_failure_prints_last_20_lines(
         assert row not in joined
     for row in rows[-20:]:
         assert row in joined
-    tf = read(path)
+    tf = read(_active(project))
     for row in rows:
         assert row in tf.body

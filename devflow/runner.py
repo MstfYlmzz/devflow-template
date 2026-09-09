@@ -31,6 +31,7 @@ from devflow.authority import (
 )
 from devflow.ci_checks import changed_files
 from devflow.freshness import ReviewRecord
+from devflow.issues import GitHubIssue, fetch_issue
 from devflow.lock import (
     LockHeld,
     StaleLock,
@@ -39,6 +40,7 @@ from devflow.lock import (
     release,
     set_agent_pid,
 )
+from devflow.paths import path_in_worktree, resolve_task, task_path
 from devflow.policy import (
     ArchitectureImpact,
     Complexity,
@@ -61,8 +63,10 @@ from devflow.states import (
 )
 from devflow.taskfile import (
     TaskFile,
+    TaskFrontmatter,
     append_section,
     body_sections,
+    create,
     decision_inputs,
     estimate_paths,
     format_estimated_floor_matches,
@@ -102,16 +106,10 @@ def start(
     dry_run: bool = False,
     after_approval: bool = False,
 ) -> StartResult:
-    path = _task_path(repo, task_id)
-    if not path.is_file():
-        raise RunnerError(f"task file not found: {path}")
-    tf = read(path)
-    current = State(tf.frontmatter.state)
     if dry_run:
-        return _dry_run(
+        return _dry_run_entry(
             repo,
-            tf,
-            current,
+            task_id,
             risk_hint,
             skip_review,
             review_advisory,
@@ -125,16 +123,37 @@ def start(
             acquire(task_id, "start", repo)
             acquired = True
         except LockHeld as exc:
-            return StartResult(task_id, current, None, None, None, [str(exc)])
+            resolved = resolve_task(repo, task_id, attach=False)
+            state = (
+                State(read(resolved).frontmatter.state)
+                if resolved is not None
+                else State.BACKLOG
+            )
+            return StartResult(task_id, state, None, None, None, [str(exc)])
         except StaleLock as exc:
+            resolved = resolve_task(repo, task_id, attach=False)
+            state = (
+                State(read(resolved).frontmatter.state)
+                if resolved is not None
+                else State.BACKLOG
+            )
             return StartResult(
                 task_id,
-                current,
+                state,
                 None,
                 None,
                 None,
                 [str(exc), f"run: devflow recover {task_id}"],
             )
+
+        messages: list[str] = []
+        try:
+            path, tf = _prepare_task_context(
+                repo, task_id, messages, after_approval=after_approval
+            )
+        except WorktreeSetupError as exc:
+            raise RunnerError(f"setup-worktree failed: {exc}") from exc
+        current = State(tf.frontmatter.state)
         return _run_locked(
             repo,
             path,
@@ -145,6 +164,7 @@ def start(
             review_advisory,
             reason,
             after_approval,
+            messages,
         )
     finally:
         if acquired:
@@ -171,9 +191,9 @@ def approve(
 
 
 def stop(repo: Path, task_id: int) -> StartResult:
-    path = _task_path(repo, task_id)
-    if not path.is_file():
-        raise RunnerError(f"task file not found: {path}")
+    path = resolve_task(repo, task_id)
+    if path is None:
+        raise RunnerError(f"task file not found: {task_id}")
     tf = read(path)
     current = State(tf.frontmatter.state)
     if current is State.MERGED:
@@ -203,9 +223,9 @@ def stop(repo: Path, task_id: int) -> StartResult:
 def cancel(repo: Path, task_id: int, reason: str, discard: bool = False) -> StartResult:
     if not reason or not str(reason).strip():
         raise RunnerError("--reason is required")
-    path = _task_path(repo, task_id)
-    if not path.is_file():
-        raise RunnerError(f"task file not found: {path}")
+    path = resolve_task(repo, task_id)
+    if path is None:
+        raise RunnerError(f"task file not found: {task_id}")
     tf = read(path)
     current = State(tf.frontmatter.state)
     if current is State.MERGED:
@@ -264,6 +284,117 @@ def run_setup_worktree(worktree: Path) -> None:
         raise WorktreeSetupError(output)
 
 
+def _prepare_task_context(
+    repo: Path,
+    task_id: int,
+    messages: list[str],
+    *,
+    after_approval: bool,
+) -> tuple[Path, TaskFile]:
+    """Materialize or promote the task file into the worktree before mutation."""
+    resolved = resolve_task(repo, task_id, attach=True)
+    if resolved is None:
+        if after_approval:
+            raise RunnerError(f"task file not found: {task_id}")
+        issue = _load_issue(repo, task_id)
+        worktree = _ensure_worktree(repo, task_id, issue.title, messages)
+        path = _materialize_issue(worktree, issue)
+        _emit(messages, task_id, f"materialized from issue #{issue.number}")
+        return path, read(path)
+
+    title = read(resolved).frontmatter.title
+    worktree = _ensure_worktree(repo, task_id, title, messages)
+    path = task_path(worktree, task_id)
+    if not path_in_worktree(repo, task_id, resolved):
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(resolved, path)
+            _emit(messages, task_id, "copied task file into worktree")
+    if not path.is_file():
+        raise RunnerError(f"task file not found in worktree: {path}")
+    return path, read(path)
+
+
+def _load_issue(repo: Path, task_id: int) -> GitHubIssue:
+    try:
+        return fetch_issue(repo, task_id)
+    except RuntimeError as exc:
+        raise RunnerError(str(exc)) from exc
+
+
+def _materialize_issue(worktree: Path, issue: GitHubIssue) -> Path:
+    path = task_path(worktree, issue.number)
+    if path.is_file():
+        return path
+    body = issue.body.strip() if issue.body.strip() else "(no description)"
+    create(
+        path,
+        issue.number,
+        issue.title,
+        body=(f"# Task {issue.number} — {issue.title}\n\n## Issue\n\n{body}\n"),
+    )
+    return path
+
+
+def _ephemeral_task_from_issue(issue: GitHubIssue) -> TaskFile:
+    body = issue.body.strip() if issue.body.strip() else "(no description)"
+    return TaskFile(
+        frontmatter=TaskFrontmatter(
+            id=issue.number,
+            title=issue.title,
+            epic=None,
+            state="BACKLOG",
+            risk_proposed=None,
+            risk_reason=None,
+            complexity_proposed=None,
+            modules=[],
+            blocked_by=[],
+            adr=[],
+            floor_risk=None,
+            floor_matched=[],
+            signals=None,
+            architecture_impact=None,
+            uncertain=False,
+            floor_risk_actual=None,
+            floor_matched_actual=[],
+            blocked_from=None,
+            blocked_reason=None,
+            review_records=[],
+        ),
+        body=f"# Task {issue.number} — {issue.title}\n\n## Issue\n\n{body}\n",
+        path=Path(f"<issue:{issue.number}>"),
+    )
+
+
+def _dry_run_entry(
+    repo: Path,
+    task_id: int,
+    risk_hint: Risk | None,
+    skip_review: bool,
+    review_advisory: bool,
+    reason: str | None,
+    after_approval: bool,
+) -> StartResult:
+    resolved = resolve_task(repo, task_id, attach=False)
+    if resolved is None:
+        if after_approval:
+            raise RunnerError(f"task file not found: {task_id}")
+        issue = _load_issue(repo, task_id)
+        tf = _ephemeral_task_from_issue(issue)
+    else:
+        tf = read(resolved)
+    return _dry_run(
+        repo,
+        tf,
+        State(tf.frontmatter.state),
+        risk_hint,
+        skip_review,
+        review_advisory,
+        reason,
+        after_approval,
+    )
+
+
 def _emit_verify_result(
     path: Path,
     messages: list[str],
@@ -290,8 +421,8 @@ def _run_locked(
     review_advisory: bool,
     reason: str | None,
     after_approval: bool,
+    messages: list[str],
 ) -> StartResult:
-    messages: list[str] = []
     task_id = tf.frontmatter.id
     if after_approval:
         if current is not State.PLAN_APPROVAL:
@@ -337,9 +468,19 @@ def _run_locked(
             repo, path, tf, decision, policy, risk_hint, messages
         )
         if State(tf.frontmatter.state) is State.BLOCKED:
-            return StartResult(task_id, State.BLOCKED, None, None, None, messages)
+            blocked_wt = gitops.task_worktree(repo, task_id)
+            return StartResult(
+                task_id,
+                State.BLOCKED,
+                blocked_wt if blocked_wt.is_dir() else None,
+                None,
+                None,
+                messages,
+            )
 
-    worktree: Path | None = None
+    worktree: Path | None = gitops.task_worktree(repo, task_id)
+    if worktree is not None and not worktree.is_dir():
+        worktree = None
     if decision.plan_required:
         planned = _write_plan(repo, path, tf, decision, policy, messages)
         if isinstance(planned, StartResult):
@@ -598,13 +739,16 @@ def _run_triage(
     task_id = tf.frontmatter.id
     epic, floor, *_rest = decision_inputs(tf, policy)
     needed = needed_triage_fields(floor, epic)
-    prompt = build_prompt("triage", tf, repo, {"needed": needed})
+    worktree = gitops.task_worktree(repo, task_id)
+    agent_cwd = worktree if worktree.is_dir() else repo
+    role_root = agent_cwd if (agent_cwd / ".ai" / "roles").is_dir() else repo
+    prompt = build_prompt("triage", tf, role_root, {"needed": needed})
     result = _run_agent(
         repo,
         task_id,
         "cursor",
         prompt,
-        repo,
+        agent_cwd,
         AgentMode.READ_ONLY,
         _timeout(policy),
         path,
@@ -969,8 +1113,8 @@ def _require_bypass_reason(
 def _unmerged_blockers(repo: Path, tf: TaskFile) -> list[int]:
     open_ids: list[int] = []
     for blocker_id in tf.frontmatter.blocked_by:
-        blocker_path = _task_path(repo, blocker_id)
-        if not blocker_path.is_file():
+        blocker_path = resolve_task(repo, blocker_id, attach=False)
+        if blocker_path is None:
             open_ids.append(blocker_id)
             continue
         other = read(blocker_path)
@@ -991,10 +1135,6 @@ def _timeout(policy: dict[str, Any]) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return 20.0
-
-
-def _task_path(repo: Path, task_id: int) -> Path:
-    return repo / ".devflow" / "tasks" / f"{task_id}.md"
 
 
 def _emit(messages: list[str], task_id: int, line: str) -> None:

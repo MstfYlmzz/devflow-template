@@ -4,7 +4,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from devflow.lock import LOCKS_GITIGNORE_LINE, ignores_lock_dir
+from devflow.lock import LOCKS_GITIGNORE_LINE
 
 _EXTRA_RELATIVE: tuple[str, ...] = (
     "scripts/verify",
@@ -87,14 +87,32 @@ def init(target: Path, force: bool = False) -> InitReport:
     return report
 
 
+_WORKTREES_GITIGNORE_LINE = ".devflow/worktrees/"
+
+
+def _gitignore_has_line(text: str, line: str) -> bool:
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == line or stripped == line.rstrip("/"):
+            return True
+    return False
+
+
 def _ensure_locks_gitignore(target: Path, report: InitReport) -> None:
     path = target / ".gitignore"
+    required = (LOCKS_GITIGNORE_LINE, _WORKTREES_GITIGNORE_LINE)
     if path.is_file():
         text = path.read_text(encoding="utf-8")
-        if ignores_lock_dir(text):
+        missing = [line for line in required if not _gitignore_has_line(text, line)]
+        if not missing:
             return
         suffix = "" if not text or text.endswith("\n") else "\n"
-        path.write_text(f"{text}{suffix}{LOCKS_GITIGNORE_LINE}\n", encoding="utf-8")
+        path.write_text(
+            f"{text}{suffix}" + "".join(f"{line}\n" for line in missing),
+            encoding="utf-8",
+        )
         return
-    path.write_text(f"{LOCKS_GITIGNORE_LINE}\n", encoding="utf-8")
+    path.write_text("".join(f"{line}\n" for line in required), encoding="utf-8")
     report.created.append(path)

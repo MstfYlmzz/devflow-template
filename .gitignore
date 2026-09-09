@@ -46,6 +46,9 @@ coverage.xml
 # Devflow run locks (machine-local)
 .devflow/locks/
 
+# Devflow task/review worktrees (machine-local)
+.devflow/worktrees/
+
 # Environment / IDE
 .env
 .env.*
