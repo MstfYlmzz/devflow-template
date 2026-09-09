@@ -19,6 +19,7 @@ from devflow.taskfile import (
     format_estimated_floor_matches,
     read,
     read_doc_impact,
+    redact,
     update_frontmatter,
 )
 
@@ -156,6 +157,27 @@ def test_append_redacts_password_assignment(tmp_path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     assert "hunter2" not in text
     assert "PASSWORD=[REDACTED]" in text
+
+
+def test_redact_skips_long_windows_path() -> None:
+    path = (
+        r"C:\Users\MustafaYilmaz\Desktop\Projects\devflow-template"
+        r"\.devflow\worktrees\wt-184\scripts\verify"
+    )
+    assert redact(path) == path
+    posix = (
+        "C:/Users/MustafaYilmaz/Desktop/Projects/devflow-template"
+        "/.devflow/worktrees/wt-184/scripts/verify"
+    )
+    assert redact(posix) == posix
+
+
+def test_redact_long_base64_token() -> None:
+    token = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+    assert len(token) >= 40
+    text = redact(f"auth {token} leftover")
+    assert token not in text
+    assert "[REDACTED]" in text
 
 
 def test_append_leaves_normal_code(tmp_path: Path) -> None:

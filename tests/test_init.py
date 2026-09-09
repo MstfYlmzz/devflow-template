@@ -25,9 +25,11 @@ def test_init_creates_expected_files(git_repo: Path) -> None:
         ".ai/review-schema.md",
         "scripts/verify",
         "scripts/verify.d/00-preflight",
+        "scripts/setup-worktree",
         ".githooks/pre-commit",
         ".githooks/pre-push",
         "scripts/setup-hooks",
+        ".gitattributes",
     ]
     for rel in expected_files:
         dest = git_repo / rel
@@ -41,6 +43,7 @@ def test_init_creates_expected_files(git_repo: Path) -> None:
     assert not (git_repo / "docs/architecture/.gitkeep").exists()
     gitignore = (git_repo / ".gitignore").read_text(encoding="utf-8")
     assert ".devflow/locks/" in gitignore
+    assert ".venv/" in gitignore
 
 
 def test_init_requires_git_repo(tmp_path: Path) -> None:

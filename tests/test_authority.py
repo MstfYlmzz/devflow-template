@@ -166,6 +166,20 @@ def test_verify_script_with_docs_ok() -> None:
     assert result.touches_control is True
 
 
+def test_setup_worktree_script_is_control() -> None:
+    result = check_control_changes(["scripts/setup-worktree"])
+    assert result.ok is True
+    assert result.touches_control is True
+    assert is_control_change(["scripts/setup-worktree"]) is True
+
+
+def test_gitattributes_is_control() -> None:
+    result = check_control_changes([".gitattributes"])
+    assert result.ok is True
+    assert result.touches_control is True
+    assert is_control_change([".gitattributes"]) is True
+
+
 def test_no_control_files_ok() -> None:
     result = check_control_changes(["src/orders/service.py"])
     assert result.ok is True
@@ -262,3 +276,5 @@ def test_control_paths_include_github_workflows() -> None:
     assert "templates/project/**" in CONTROL_PATHS
     assert "templates/project/.ai/**" not in CONTROL_PATHS
     assert ".gitignore" in CONTROL_PATHS
+    assert ".gitattributes" in CONTROL_PATHS
+    assert "scripts/setup-worktree" in CONTROL_PATHS

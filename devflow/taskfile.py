@@ -42,6 +42,7 @@ SECRET_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"AKIA[A-Z0-9]{16}", "[REDACTED]"),
     (r"(?i)\b(PASSWORD|TOKEN|SECRET|API_KEY)=(\S+)", r"\1=[REDACTED]"),
     (r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]"),
+    # Skip matches that contain path separators; see _redact_long_token.
     (r"[A-Za-z0-9+/_=-]{40,}", "[REDACTED]"),
 )
 
@@ -90,10 +91,20 @@ class DocImpact:
     adr: str | None
 
 
+def _redact_long_token(match: re.Match[str]) -> str:
+    token = match.group(0)
+    if any(sep in token for sep in ("/", "\\", ":")):
+        return token
+    return "[REDACTED]"
+
+
 def redact(text: str) -> str:
     result = text
     for pattern, replacement in _COMPILED_SECRETS:
-        result = pattern.sub(replacement, result)
+        if pattern.pattern == r"[A-Za-z0-9+/_=-]{40,}":
+            result = pattern.sub(_redact_long_token, result)
+        else:
+            result = pattern.sub(replacement, result)
     return result
 
 

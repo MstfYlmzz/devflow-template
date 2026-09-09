@@ -12,7 +12,16 @@ from devflow.agents import AgentMode, AgentResult, AgentStatus
 from devflow.gitops import ensure_task_worktree, inspect_resume, task_worktree
 from devflow.lock import acquire, lock_path, read_lock
 from devflow.policy import Complexity, Risk
-from devflow.runner import RunnerError, approve, cancel, start, stop
+from devflow.runner import (
+    RunnerError,
+    WorktreeSetupError,
+    approve,
+    cancel,
+    run_setup_worktree,
+    run_verify,
+    start,
+    stop,
+)
 from devflow.states import State
 from devflow.taskfile import append_section, body_sections, create, read
 from tests.conftest import git
@@ -294,6 +303,12 @@ def test_verify_failure_stays_implementing(
     assert result.worktree is not None
     assert result.worktree.is_dir()
     assert read_lock(184, project) is None
+    joined = "\n".join(result.messages)
+    assert "verify... FAIL" in joined
+    assert "--- verify output (last 20 lines) ---" in joined
+    assert "boom" in joined
+    tf = read(path)
+    assert "boom" in tf.body
 
 
 def test_rebase_conflict_blocks_and_keeps_worktree(
@@ -572,3 +587,114 @@ def test_low_skips_plan_generation(
     assert AgentMode.EDIT in modes
     tf = read(path)
     assert "Plan" not in body_sections(tf)
+
+
+def _write_exec(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8", newline="\n")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def test_run_verify_with_spaces_and_backslashes_in_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = tmp_path / "dir with spaces" / "worktree"
+    _write_exec(
+        worktree / "scripts" / "verify",
+        "#!/usr/bin/env bash\necho verify-ok\n",
+    )
+    recorded: list[tuple[object, dict[str, object]]] = []
+    real = subprocess.run
+
+    def wrapped(*args: object, **kwargs: object) -> object:
+        recorded.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("devflow.runner.subprocess.run", wrapped)
+    passed, output = run_verify(worktree)
+    assert passed is True
+    assert "verify-ok" in output
+    assert recorded
+    args, kwargs = recorded[0]
+    argv = args[0] if args else kwargs["args"]
+    assert isinstance(argv, list)
+    assert kwargs.get("cwd") == worktree
+    assert kwargs.get("shell") is False
+    assert all(str(worktree) not in str(part) for part in argv)
+    assert argv[-1] in {"./scripts/verify", "scripts/verify"}
+    assert all("\\" not in str(part) for part in argv)
+
+
+def test_run_setup_worktree_runs_when_present(tmp_path: Path) -> None:
+    _write_exec(
+        tmp_path / "scripts" / "setup-worktree",
+        "#!/usr/bin/env bash\nprintf 'ok' > marker.txt\n",
+    )
+    run_setup_worktree(tmp_path)
+    assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_run_setup_worktree_missing_is_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("subprocess.run should not be called")
+
+    monkeypatch.setattr("devflow.runner.subprocess.run", boom)
+    run_setup_worktree(tmp_path)
+
+
+def test_run_setup_worktree_failure_raises(tmp_path: Path) -> None:
+    _write_exec(
+        tmp_path / "scripts" / "setup-worktree",
+        "#!/usr/bin/env bash\necho setup-boom >&2\nexit 1\n",
+    )
+    with pytest.raises(WorktreeSetupError, match="setup-boom"):
+        run_setup_worktree(tmp_path)
+
+
+def test_setup_worktree_failure_blocks(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git(project, "config", "core.autocrlf", "false")
+    _write_exec(
+        project / "scripts" / "setup-worktree",
+        "#!/usr/bin/env bash\necho setup-boom >&2\nexit 1\n",
+    )
+    git(project, "add", "-A")
+    git(project, "commit", "-m", "add setup-worktree")
+    _origin_main(project)
+    path = _task(
+        project,
+        risk_proposed=Risk.LOW,
+        complexity_proposed=Complexity.LOW,
+        modules=["src/app.py"],
+    )
+    monkeypatch.setattr("devflow.agents.run", _ok_agent(path))
+    result = start(project, 184)
+    assert result.final_state is State.BLOCKED
+    tf = read(path)
+    assert tf.frontmatter.blocked_reason == "SETUP_WORKTREE_FAILED"
+    assert "setup-boom" in tf.body
+    assert not task_worktree(project, 184).exists()
+    assert any("setup-worktree... FAIL" in item for item in result.messages)
+
+
+def test_verify_failure_prints_last_20_lines(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [f"verify-row-{index:02d}" for index in range(1, 26)]
+    output = "\n".join(rows) + "\n"
+    path = _task(project, **_epic())
+    monkeypatch.setattr("devflow.agents.run", _ok_agent(path))
+    monkeypatch.setattr("devflow.runner.run_verify", lambda _wt: (False, output))
+    result = start(project, 184)
+    joined = "\n".join(result.messages)
+    assert "--- verify output (last 20 lines) ---" in joined
+    for row in rows[:5]:
+        assert row not in joined
+    for row in rows[-20:]:
+        assert row in joined
+    tf = read(path)
+    for row in rows:
+        assert row in tf.body
