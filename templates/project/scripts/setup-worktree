@@ -8,23 +8,79 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-if command -v python3 >/dev/null 2>&1; then
-  PY=python3
-else
-  PY=python
+# Prefer `python` over `python3`: on Windows Git Bash, `python3` is often a
+# non-functional WindowsApps execution alias while `python` points at a real
+# interpreter (including an already-activated repo .venv).
+_python_usable() {
+  local cand="$1"
+  command -v "$cand" >/dev/null 2>&1 || return 1
+  "$cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
+    >/dev/null 2>&1
+}
+
+select_python() {
+  local cand
+  for cand in python python3; do
+    if _python_usable "$cand"; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  echo "error: Python 3.11+ not found" >&2
+  return 1
+}
+
+remove_venv_dir() {
+  if [[ ! -e .venv && ! -L .venv ]]; then
+    return 0
+  fi
+  rm -rf .venv 2>/dev/null || true
+  if [[ -e .venv || -L .venv ]]; then
+    echo "warning: could not remove partial .venv" >&2
+    return 1
+  fi
+  return 0
+}
+
+create_venv() {
+  local py="$1"
+  local status=0
+  if [[ -e .venv || -L .venv ]]; then
+    remove_venv_dir || {
+      echo "error: existing .venv could not be removed" >&2
+      return 1
+    }
+  fi
+  # ``cmd || status=$?`` keeps the real exit code under ``set -e``;
+  # ``if ! cmd; status=$?`` would observe the negated-condition status.
+  "$py" -m venv .venv || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    remove_venv_dir || true
+    echo "error: failed to create .venv with $py" >&2
+    return "$status"
+  fi
+  return 0
+}
+
+resolve_venv_python() {
+  if [[ -x .venv/Scripts/python.exe ]]; then
+    printf '%s\n' .venv/Scripts/python.exe
+  elif [[ -x .venv/Scripts/python ]]; then
+    printf '%s\n' .venv/Scripts/python
+  elif [[ -x .venv/bin/python ]]; then
+    printf '%s\n' .venv/bin/python
+  else
+    echo "error: venv python not found" >&2
+    return 1
+  fi
+}
+
+if [[ "${1:-}" == "--print-python" ]]; then
+  select_python
+  exit 0
 fi
 
-"${PY}" -m venv .venv
-
-if [[ -x .venv/Scripts/python.exe ]]; then
-  VENV_PY=.venv/Scripts/python.exe
-elif [[ -x .venv/Scripts/python ]]; then
-  VENV_PY=.venv/Scripts/python
-elif [[ -x .venv/bin/python ]]; then
-  VENV_PY=.venv/bin/python
-else
-  echo "error: venv python not found" >&2
-  exit 1
-fi
-
+PY="$(select_python)"
+create_venv "$PY"
+VENV_PY="$(resolve_venv_python)"
 "${VENV_PY}" -m pip install -e ".[dev]"
