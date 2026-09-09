@@ -25,9 +25,13 @@ signal_floor:
 
 routing:
   complexity:
-    LOW: claude
-    MEDIUM: claude
-    HIGH: claude
+    # TEMPORARY BOOTSTRAP ROUTING:
+    # Cursor CLI is not configured and Claude quota is currently unavailable.
+    # Restore LOW/MEDIUM -> cursor when the Cursor adapter is available.
+    # HIGH remains codex in the intended architecture.
+    LOW: codex
+    MEDIUM: codex
+    HIGH: codex
   risk:
     LOW:    {plan_approval: false, review: false, evidence: false}
     MEDIUM: {plan_approval: false, review: true,  evidence: false}
