@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from devflow.capabilities import ProviderCapabilities
 from devflow.cli import _cmd_start, _interactive_runtime_selector
 from devflow.policy import Complexity
-from devflow.runner import StartResult
+from devflow.runner import StartResult, _runtime_heartbeat
 from devflow.runtime import RuntimeChoice, RuntimeSelection, recommended_effort
 from devflow.states import State
 
@@ -102,3 +104,24 @@ def test_noninteractive_start_never_reads_input(
     )
     assert code == 0
     assert captured["runtime_selector"] is None
+
+
+def test_runtime_heartbeat_reports_elapsed_while_agent_is_silent() -> None:
+    activity: list[str] = []
+    stop = threading.Event()
+    emitted = threading.Event()
+
+    def record(line: str) -> None:
+        activity.append(line)
+        emitted.set()
+
+    thread = threading.Thread(
+        target=_runtime_heartbeat,
+        args=(record, stop, 0.01),
+    )
+    thread.start()
+    assert emitted.wait(timeout=1)
+    stop.set()
+    thread.join(timeout=1)
+    assert activity
+    assert all(item.startswith("working · elapsed 00:") for item in activity)

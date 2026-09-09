@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1529,6 +1531,15 @@ def _run_agent(
 ) -> AgentResult:
     prompt_file = _write_prompt(prompt)
     activity = _terminal_activity(task_id, f"{agent} {mode.value}")
+    heartbeat_stop = threading.Event()
+    heartbeat: threading.Thread | None = None
+    if activity is not None:
+        heartbeat = threading.Thread(
+            target=_runtime_heartbeat,
+            args=(activity, heartbeat_stop),
+            daemon=True,
+        )
+        heartbeat.start()
     try:
 
         def on_spawn(pid: int) -> None:
@@ -1549,6 +1560,9 @@ def _run_agent(
             effort=runtime.effort,
         )
     finally:
+        heartbeat_stop.set()
+        if heartbeat is not None:
+            heartbeat.join(timeout=1)
         set_agent_pid(task_id, repo, None)
         prompt_file.unlink(missing_ok=True)
     findings = check_agent_output_for_violations(result.output)
@@ -1828,6 +1842,18 @@ def _terminal_activity(task_id: int, phase: str) -> Callable[[str], None] | None
             print(f"{task_id}:   {phase}: {line}", flush=True)
 
     return emit
+
+
+def _runtime_heartbeat(
+    activity: Callable[[str], None],
+    stop: threading.Event,
+    interval_seconds: float = 10.0,
+) -> None:
+    started = time.monotonic()
+    while not stop.wait(interval_seconds):
+        elapsed = int(time.monotonic() - started)
+        minutes, seconds = divmod(elapsed, 60)
+        activity(f"working · elapsed {minutes:02d}:{seconds:02d}")
 
 
 def _emit_agent_result(
