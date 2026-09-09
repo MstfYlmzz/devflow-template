@@ -117,6 +117,39 @@ def test_run_unknown_stderr_is_blocked(
     )
     result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
     assert result.status is AgentStatus.BLOCKED
+    assert result.output == ""
+    assert result.exit_code == 1
+    assert result.detail == "agent exited with code 1\nsomething went boom"
+
+
+def test_failure_diagnostic_is_redacted_and_truncated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    secret = "sk-" + ("a" * 48)
+    _set_cursor(
+        monkeypatch,
+        _script(
+            tmp_path,
+            "secret.py",
+            (
+                "import sys\n"
+                "sys.stderr.write("
+                f"'authentication failed {secret}\\n' + 'word ' * 1000"
+                ")\n"
+                "sys.exit(7)\n"
+            ),
+        ),
+    )
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
+    assert result.status is AgentStatus.BLOCKED
+    assert result.output == ""
+    assert result.exit_code == 7
+    assert result.detail is not None
+    assert secret not in result.detail
+    assert "[REDACTED]" in result.detail
+    assert result.detail.startswith("agent exited with code 7")
+    assert result.detail.endswith("...[truncated]...")
 
 
 def test_run_timeout_kills_process(

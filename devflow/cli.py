@@ -11,6 +11,7 @@ from pathlib import Path
 from devflow.agents import (
     COMMANDS,
     AgentMode,
+    AgentStatus,
     _defined_modes,
     _resolve_command,
     run,
@@ -483,7 +484,11 @@ def _cmd_agent_smoke(*, agent: str) -> int:
             check=True,
         )
 
-        run(agent, prompt_file, worktree, AgentMode.READ_ONLY)
+        read_result = run(agent, prompt_file, worktree, AgentMode.READ_ONLY)
+        if read_result.status is not AgentStatus.OK:
+            print(f"{agent}: {read_result.status.value.upper()}")
+            print(read_result.detail or "agent unavailable")
+            return 1
         read_only_ok = (
             target.is_file() and target.read_text(encoding="utf-8") == _SMOKE_SOURCE
         )
@@ -493,7 +498,11 @@ def _cmd_agent_smoke(*, agent: str) -> int:
             print("read_only: file modified — FAIL")
 
         target.write_text(_SMOKE_SOURCE, encoding="utf-8")
-        run(agent, prompt_file, worktree, AgentMode.EDIT)
+        edit_result = run(agent, prompt_file, worktree, AgentMode.EDIT)
+        if edit_result.status is not AgentStatus.OK:
+            print(f"{agent}: {edit_result.status.value.upper()}")
+            print(edit_result.detail or "agent unavailable")
+            return 1
         edit_ok = (
             target.is_file() and target.read_text(encoding="utf-8") != _SMOKE_SOURCE
         )

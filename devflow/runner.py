@@ -714,15 +714,13 @@ def _implement_onward(
         timeout,
         path,
     )
-    _emit(
-        messages,
-        task_id,
-        (
-            f"implementer ({decision.implementer}, edit)..."
-            f" {int(result.duration_seconds)}s"
-        ),
+    _emit_agent_result(
+        messages, task_id, "implementer", decision.implementer, AgentMode.EDIT, result
     )
-    if result.status is AgentStatus.BLOCKED:
+    if result.status is not AgentStatus.OK:
+        _record_agent_error(
+            path, "Implementer error", decision.implementer, AgentMode.EDIT, result
+        )
         _block(path, State.IMPLEMENTING, "IMPLEMENTER_UNAVAILABLE", decision, messages)
         return StartResult(task_id, State.BLOCKED, worktree, None, None, messages)
 
@@ -1018,15 +1016,22 @@ def _write_plan(
         _timeout(policy),
         path,
     )
-    _emit(
+    _emit_agent_result(
         messages,
         task_id,
-        (
-            f"implementer ({decision.implementer}, read_only)..."
-            f" {int(result.duration_seconds)}s"
-        ),
+        "implementer",
+        decision.implementer,
+        AgentMode.READ_ONLY,
+        result,
     )
-    if result.status is AgentStatus.BLOCKED:
+    if result.status is not AgentStatus.OK:
+        _record_agent_error(
+            path,
+            "Implementer error",
+            decision.implementer,
+            AgentMode.READ_ONLY,
+            result,
+        )
         current = State(tf.frontmatter.state)
         _block(path, current, "IMPLEMENTER_UNAVAILABLE", decision, messages)
         return StartResult(task_id, State.BLOCKED, worktree, None, None, messages)
@@ -1120,12 +1125,9 @@ def _run_triage(
             _timeout(policy),
             path,
         )
-    _emit(
-        messages,
-        task_id,
-        f"triage ({agent}, read_only)... {int(result.duration_seconds)}s",
-    )
-    if result.status is AgentStatus.BLOCKED:
+    _emit_agent_result(messages, task_id, "triage", agent, AgentMode.READ_ONLY, result)
+    if result.status is not AgentStatus.OK:
+        _record_agent_error(path, "Triage error", agent, AgentMode.READ_ONLY, result)
         tf = _block(path, State.TRIAGE, "AGENT_BLOCKED", decision, messages)
         return tf, decision
     try:
@@ -1187,17 +1189,12 @@ def _run_review(
         result = _run_agent(
             repo, task_id, "claude", prompt, review_wt, AgentMode.REVIEW, timeout, path
         )
-        _emit(
-            messages,
-            task_id,
-            f"reviewer (claude, review)... {int(result.duration_seconds)}s",
+        _emit_agent_result(
+            messages, task_id, "reviewer", "claude", AgentMode.REVIEW, result
         )
         if result.status is not AgentStatus.OK:
-            detail = result.detail or result.status.value
-            append_section(
-                path,
-                "Review error",
-                f"status: {result.status.value}\ndetail: {detail}\n",
+            _record_agent_error(
+                path, "Review error", "claude", AgentMode.REVIEW, result
             )
             tf = _block(path, State.REVIEW, "REVIEWER_UNAVAILABLE", decision, messages)
             return None, tf
@@ -1601,6 +1598,45 @@ def _emit(messages: list[str], task_id: int, line: str) -> None:
     text = f"{task_id}: {line}"
     messages.append(text)
     print(text, flush=True)
+
+
+def _emit_agent_result(
+    messages: list[str],
+    task_id: int,
+    role: str,
+    agent: str,
+    mode: AgentMode,
+    result: AgentResult,
+) -> None:
+    mark = "✓" if result.status is AgentStatus.OK else "✗"
+    _emit(
+        messages,
+        task_id,
+        (f"{mark} {role} ({agent}, {mode.value}) · {result.duration_seconds:.1f}s"),
+    )
+    if result.status is not AgentStatus.OK:
+        for line in (result.detail or result.status.value).splitlines():
+            _emit(messages, task_id, f"  {line}")
+
+
+def _record_agent_error(
+    path: Path,
+    heading: str,
+    agent: str,
+    mode: AgentMode,
+    result: AgentResult,
+) -> None:
+    detail = result.detail or result.status.value
+    append_section(
+        path,
+        heading,
+        (
+            f"provider: {agent}\n"
+            f"mode: {mode.value}\n"
+            f"status: {result.status.value}\n"
+            f"detail: {_truncate_agent_output(detail, limit=2000)}\n"
+        ),
+    )
 
 
 def _warn_unconfigured(

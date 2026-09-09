@@ -12,6 +12,7 @@ from pathlib import Path
 
 from devflow.authority import sanitized_env
 from devflow.lock import is_process_alive
+from devflow.taskfile import redact
 
 COMMANDS: dict[str, str] = {
     "cursor": "DEVFLOW_CURSOR_CMD",
@@ -52,6 +53,7 @@ class AgentResult:
     output: str
     detail: str | None
     duration_seconds: float
+    exit_code: int | None = None
 
 
 def _split_command(raw: str) -> list[str]:
@@ -251,8 +253,17 @@ def classify_failure(exit_code: int, stderr: str) -> tuple[AgentStatus, str]:
     lowered = stderr.casefold()
     for pattern in RETRY_PATTERNS:
         if pattern.casefold() in lowered:
-            return AgentStatus.RETRY, pattern
-    return AgentStatus.BLOCKED, "blocked"
+            return AgentStatus.RETRY, _safe_failure_detail(exit_code, stderr)
+    return AgentStatus.BLOCKED, _safe_failure_detail(exit_code, stderr)
+
+
+def _safe_failure_detail(exit_code: int, stderr: str, limit: int = 2000) -> str:
+    """Return a bounded, secret-safe process diagnostic for terminal/journal use."""
+    cleaned = redact(stderr).strip()
+    if len(cleaned) > limit:
+        cleaned = cleaned[:limit].rstrip() + "\n...[truncated]..."
+    prefix = f"agent exited with code {exit_code}"
+    return f"{prefix}\n{cleaned}" if cleaned else prefix
 
 
 def run(
@@ -281,6 +292,7 @@ def run(
             output="",
             detail=f"{agent} command not configured (set {env_name})",
             duration_seconds=time.monotonic() - started,
+            exit_code=None,
         )
 
     timeout_seconds = timeout_minutes * 60
@@ -319,12 +331,14 @@ def run(
                 output="",
                 detail="agent output is not valid UTF-8",
                 duration_seconds=time.monotonic() - started,
+                exit_code=proc.returncode,
             )
         return AgentResult(
             status=AgentStatus.BLOCKED,
             output=stdout_text,
             detail=term_detail,
             duration_seconds=time.monotonic() - started,
+            exit_code=proc.returncode,
         )
 
     decoded = _decode_agent_pipes(stdout_b, stderr_b)
@@ -335,6 +349,7 @@ def run(
             output="",
             detail="agent output is not valid UTF-8",
             duration_seconds=time.monotonic() - started,
+            exit_code=proc.returncode,
         )
     duration = time.monotonic() - started
     if proc.returncode == 0:
@@ -343,6 +358,7 @@ def run(
             output=stdout_text,
             detail=None,
             duration_seconds=duration,
+            exit_code=0,
         )
     status, detail = classify_failure(proc.returncode or 1, stderr_text)
     return AgentResult(
@@ -350,6 +366,7 @@ def run(
         output=stdout_text,
         detail=detail,
         duration_seconds=duration,
+        exit_code=proc.returncode,
     )
 
 
@@ -394,4 +411,5 @@ def run_with_retry(
         output=last.output,
         detail=f"retry exhausted after {max_attempts} attempts: {last.detail}",
         duration_seconds=last.duration_seconds,
+        exit_code=last.exit_code,
     )
