@@ -4,11 +4,17 @@ Plan and apply the change. The planner and the implementer are the same actor.
 
 ## Plan
 
-Match plan detail to risk using the `routing.risk` table in `.ai/policy.yml`.
+Devflow computes `plan_detail` before invoking this role. Follow the supplied
+`plan_detail` value exactly.
 
-- LOW: no plan
-- MEDIUM: short plan
-- HIGH: formal plan plus human approval
+- `plan_detail: none` → write no plan
+- `plan_detail: brief` → short bullet plan
+- `plan_detail: formal` → detailed / formal plan
+
+Do not derive plan depth from risk.
+Risk controls approval, review, and evidence.
+Complexity determines plan depth through Devflow policy via the supplied
+`plan_detail`.
 
 ## Apply
 

@@ -289,7 +289,6 @@ def run(
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
-        "text": True,
         "env": sanitized_env() if env is None else env,
     }
     if os.name == "nt":
@@ -302,40 +301,68 @@ def run(
     if on_spawn is not None:
         on_spawn(proc.pid)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         terminate_tree(proc.pid)
         try:
-            stdout, stderr = proc.communicate(timeout=1)
+            stdout_b, stderr_b = proc.communicate(timeout=1)
         except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
+            stdout_b, stderr_b = b"", b""
         if is_process_alive(proc.pid):
             term_detail = "timeout; process tree still running after terminate"
         else:
             term_detail = "timeout; process tree terminated"
+        stdout_text, stderr_text = _decode_agent_pipes(stdout_b, stderr_b)
+        if stdout_text is None:
+            return AgentResult(
+                status=AgentStatus.BLOCKED,
+                output="",
+                detail="agent output is not valid UTF-8",
+                duration_seconds=time.monotonic() - started,
+            )
         return AgentResult(
             status=AgentStatus.BLOCKED,
-            output=f"{stdout}{stderr}",
+            output=stdout_text,
             detail=term_detail,
             duration_seconds=time.monotonic() - started,
         )
 
-    output = f"{stdout}{stderr}"
+    decoded = _decode_agent_pipes(stdout_b, stderr_b)
+    stdout_text, stderr_text = decoded
+    if stdout_text is None or stderr_text is None:
+        return AgentResult(
+            status=AgentStatus.BLOCKED,
+            output="",
+            detail="agent output is not valid UTF-8",
+            duration_seconds=time.monotonic() - started,
+        )
     duration = time.monotonic() - started
     if proc.returncode == 0:
         return AgentResult(
             status=AgentStatus.OK,
-            output=output,
+            output=stdout_text,
             detail=None,
             duration_seconds=duration,
         )
-    status, detail = classify_failure(proc.returncode or 1, stderr)
+    status, detail = classify_failure(proc.returncode or 1, stderr_text)
     return AgentResult(
         status=status,
-        output=output,
+        output=stdout_text,
         detail=detail,
         duration_seconds=duration,
     )
+
+
+def _decode_agent_pipes(
+    stdout_b: bytes | None, stderr_b: bytes | None
+) -> tuple[str | None, str | None]:
+    """Decode agent pipes as UTF-8. Return ``(None, None)`` on decode failure."""
+    try:
+        stdout_text = (stdout_b or b"").decode("utf-8")
+        stderr_text = (stderr_b or b"").decode("utf-8")
+    except UnicodeDecodeError:
+        return None, None
+    return stdout_text, stderr_text
 
 
 def run_with_retry(
