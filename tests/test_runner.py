@@ -16,8 +16,10 @@ from devflow.policy import Complexity, Risk
 from devflow.runner import (
     RunnerError,
     WorktreeSetupError,
+    _worktree_script_argv,
     approve,
     cancel,
+    resolve_git_bash,
     run_setup_worktree,
     run_verify,
     start,
@@ -632,7 +634,127 @@ def test_run_verify_with_spaces_and_backslashes_in_path(
     assert kwargs.get("shell") is False
     assert all(str(worktree) not in str(part) for part in argv)
     assert argv[-1] in {"./scripts/verify", "scripts/verify"}
-    assert all("\\" not in str(part) for part in argv)
+    # Relative script path stays POSIX; Windows Git Bash absolute path may use `\`.
+    assert "\\" not in str(argv[-1])
+    if os.name == "nt":
+        assert argv[0] != "bash"
+        assert Path(argv[0]).is_absolute()
+    else:
+        assert all("\\" not in str(part) for part in argv)
+
+
+def test_windows_worktree_argv_uses_resolved_git_bash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows-only argv contract")
+    git_bash = tmp_path / "Git" / "usr" / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
+    wsl = tmp_path / "System32" / "bash.exe"
+    wsl.parent.mkdir(parents=True)
+    wsl.write_text("", encoding="utf-8")
+
+    def fake_which(name: str) -> str | None:
+        if name == "bash":
+            return str(wsl)
+        return None
+
+    monkeypatch.setattr("devflow.runner.shutil.which", fake_which)
+    monkeypatch.setenv("PATH", str(wsl.parent))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    argv = _worktree_script_argv("scripts/setup-worktree")
+    assert argv[0] != "bash"
+    assert Path(argv[0]).resolve() == git_bash.resolve()
+    assert argv[1] == "scripts/setup-worktree"
+
+
+def test_windows_worktree_argv_rejects_wsl_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows-only argv contract")
+    wsl = tmp_path / "System32" / "bash.exe"
+    wsl.parent.mkdir(parents=True)
+    wsl.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("devflow.runner.shutil.which", lambda _name: str(wsl))
+    monkeypatch.setenv("PATH", str(wsl.parent))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "NoGit"))
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    with pytest.raises(RunnerError, match="Git Bash not found"):
+        _worktree_script_argv("scripts/verify")
+
+
+def test_windows_worktree_scripts_share_git_bash_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows-only argv contract")
+    git_bash = tmp_path / "Git" / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
+    monkeypatch.setattr("devflow.runner.shutil.which", lambda _name: None)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+    setup_argv = _worktree_script_argv("scripts/setup-worktree")
+    verify_argv = _worktree_script_argv("scripts/verify")
+    assert setup_argv[0] == verify_argv[0] == str(git_bash.resolve())
+    assert setup_argv[1] == "scripts/setup-worktree"
+    assert verify_argv[1] == "scripts/verify"
+
+
+def test_non_windows_worktree_argv_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("devflow.runner.os.name", "posix")
+    argv = _worktree_script_argv("scripts/verify")
+    assert argv == ["./scripts/verify"]
+
+
+def test_run_setup_worktree_propagates_missing_git_bash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows-only missing-bash path")
+    _write_exec(
+        tmp_path / "scripts" / "setup-worktree",
+        "#!/usr/bin/env bash\necho ok\n",
+    )
+
+    def boom() -> str:
+        raise RunnerError("Git Bash not found")
+
+    monkeypatch.setattr("devflow.runner.resolve_git_bash", boom)
+    called = False
+
+    def fake_run(*_args: object, **_kwargs: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("subprocess.run must not be called")
+
+    monkeypatch.setattr("devflow.runner.subprocess.run", fake_run)
+    with pytest.raises(RunnerError, match="Git Bash not found"):
+        run_setup_worktree(tmp_path)
+    assert called is False
+
+
+def test_resolve_git_bash_smoke_on_this_host() -> None:
+    if os.name != "nt":
+        pytest.skip("Windows host smoke")
+    path = Path(resolve_git_bash())
+    assert path.is_file()
+    key = str(path).replace("/", "\\").casefold()
+    assert "bash.exe" in key
+    assert "system32" not in key
+    assert "windowsapps" not in key
+    assert "\\git\\" in key
 
 
 def test_run_setup_worktree_runs_when_present(tmp_path: Path) -> None:

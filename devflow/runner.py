@@ -247,10 +247,80 @@ def cancel(repo: Path, task_id: int, reason: str, discard: bool = False) -> Star
     return StartResult(task_id, State.CANCELLED, kept, None, None, messages)
 
 
+def _is_wsl_bash(path: Path) -> bool:
+    """Return True for WSL / WindowsApps bash launchers (not Git Bash)."""
+    key = str(path).replace("/", "\\").casefold()
+    markers = (
+        "\\system32\\bash.exe",
+        "\\system32\\bash",
+        "\\windowsapps\\",
+        "\\wsl\\",
+        "wsl.exe",
+    )
+    return any(marker in key for marker in markers)
+
+
+def _is_git_for_windows_bash(path: Path) -> bool:
+    """Heuristic: Git for Windows installs under a ``Git`` directory."""
+    key = str(path).replace("/", "\\").casefold()
+    if _is_wsl_bash(path):
+        return False
+    return "\\git\\" in key and key.endswith("bash.exe")
+
+
+def resolve_git_bash() -> str:
+    """Resolve Git for Windows ``bash.exe`` to an absolute path.
+
+    Bare ``\"bash\"`` under Windows ``CreateProcess`` often launches WSL's
+    ``bash.exe`` instead of Git Bash. Worktree scripts must use Git Bash.
+    """
+    if os.name != "nt":
+        bash = shutil.which("bash")
+        if not bash:
+            raise RunnerError("Git Bash not found")
+        return str(Path(bash).resolve())
+
+    candidates: list[Path] = []
+    which = shutil.which("bash")
+    if which:
+        candidates.append(Path(which))
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry.strip():
+            continue
+        candidates.append(Path(entry) / "bash.exe")
+        candidates.append(Path(entry) / "bash")
+    for base_key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        base = os.environ.get(base_key, "").strip()
+        if not base:
+            continue
+        root = Path(base) / "Git"
+        candidates.append(root / "bin" / "bash.exe")
+        candidates.append(root / "usr" / "bin" / "bash.exe")
+
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+        except OSError:
+            continue
+        key = str(resolved).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        if not resolved.is_file():
+            continue
+        if _is_wsl_bash(resolved):
+            continue
+        if _is_git_for_windows_bash(resolved):
+            return str(resolved)
+
+    raise RunnerError("Git Bash not found")
+
+
 def _worktree_script_argv(relative: str) -> list[str]:
     rel = relative.replace("\\", "/")
     if os.name == "nt":
-        return ["bash", rel]
+        return [resolve_git_bash(), rel]
     return [f"./{rel}"]
 
 
