@@ -99,6 +99,7 @@ signal_floor:
 
 routing:
   triage: cursor
+  reviewer: claude
   complexity:
     LOW: cursor
     MEDIUM: cursor

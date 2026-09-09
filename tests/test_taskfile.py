@@ -8,6 +8,7 @@ import pytest
 
 from devflow.freshness import ReviewRecord
 from devflow.policy import Complexity, Risk, TriageSignals, apply_floor, load_policy
+from devflow.runtime import RuntimeChoice, RuntimeSelection
 from devflow.taskfile import (
     TaskFrontmatter,
     append_section,
@@ -178,6 +179,29 @@ def test_redact_long_base64_token() -> None:
     text = redact(f"auth {token} leftover")
     assert token not in text
     assert "[REDACTED]" in text
+
+
+def test_runtime_selection_round_trips_and_old_tasks_default_to_none(
+    tmp_path: Path,
+) -> None:
+    old_path = tmp_path / "old.md"
+    old_path.write_text(
+        "---\nid: 1\ntitle: Old task\nstate: IMPLEMENTING\n---\n",
+        encoding="utf-8",
+    )
+    assert read(old_path).frontmatter.runtime_selection is None
+
+    path = tmp_path / "task.md"
+    selection = RuntimeSelection(
+        triage=RuntimeChoice(model="gpt-triage", effort="medium"),
+        implementer=RuntimeChoice(model="gpt-code", effort="high"),
+        reviewer=RuntimeChoice(model="opus", effort="high"),
+    )
+    create(path, 2, "Runtime task", runtime_selection=selection)
+    assert read(path).frontmatter.runtime_selection == selection
+    text = path.read_text(encoding="utf-8")
+    assert "runtime_selection:" in text
+    assert "provider:" not in text
 
 
 def test_append_leaves_normal_code(tmp_path: Path) -> None:

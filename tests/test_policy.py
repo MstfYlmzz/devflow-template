@@ -17,6 +17,7 @@ from devflow.policy import (
     fast_lane_eligible,
     load_policy,
     needed_triage_fields,
+    review_provider,
     risk_from_signals,
     validate_policy,
 )
@@ -44,6 +45,14 @@ def test_policy_yml_is_valid_yaml_with_required_keys() -> None:
     data = _policy()
     for key in _TOP_LEVEL:
         assert key in data
+
+
+def test_reviewer_provider_is_policy_controlled_and_independent() -> None:
+    policy = _policy()
+    assert review_provider(policy) == "claude"
+    policy["routing"]["reviewer"] = "codex"  # type: ignore[index]
+    errors = validate_policy(policy)
+    assert any("independent reviewer invariant" in item for item in errors)
 
 
 def test_floor_auth_login_is_high() -> None:

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from devflow.agents import AgentMode, AgentResult, AgentStatus
+from devflow.capabilities import ProviderCapabilities
 from devflow.gitops import (
     ensure_task_worktree,
     inspect_resume,
@@ -33,6 +34,7 @@ from devflow.runner import (
     start,
     stop,
 )
+from devflow.runtime import RuntimeChoice, RuntimeSelection
 from devflow.states import State
 from devflow.taskfile import append_section, body_sections, create, read
 from tests.conftest import git
@@ -289,6 +291,57 @@ def test_no_epic_runs_triage(project: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("devflow.agents.run", _ok_agent(path))
     result = start(project, 184)
     assert any("triage (cursor, read_only)" in item for item in result.messages)
+
+
+def test_start_persists_runtime_selection_without_changing_providers(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _task(project, **_epic(complexity_proposed=Complexity.HIGH))
+    selected = RuntimeSelection(
+        triage=RuntimeChoice(effort="medium"),
+        implementer=RuntimeChoice(model="gpt-code", effort="high"),
+        reviewer=RuntimeChoice(model="opus", effort="high"),
+    )
+
+    def capability(provider: str) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider=provider,
+            command=provider,
+            configured=True,
+            available=True,
+            models=("opus", "sonnet") if provider == "claude" else (),
+            efforts=("low", "medium", "high"),
+            supports_model_override=True,
+            supports_effort_override=True,
+        )
+
+    monkeypatch.setattr("devflow.runner.discover_provider", capability)
+    invocations: list[tuple[str, AgentMode, object, object]] = []
+    base = _ok_agent(path, "[]")
+
+    def agent(
+        provider: str,
+        prompt_file: Path,
+        worktree: Path,
+        mode: AgentMode,
+        **kwargs: object,
+    ) -> AgentResult:
+        invocations.append((provider, mode, kwargs.get("model"), kwargs.get("effort")))
+        return base(provider, prompt_file, worktree, mode, **kwargs)
+
+    monkeypatch.setattr("devflow.agents.run", agent)
+    result = start(
+        project,
+        184,
+        runtime_selector=lambda *_args: selected,
+    )
+    assert result.final_state is State.READY_TO_MERGE
+    stored = read(_active(project)).frontmatter.runtime_selection
+    assert stored == selected
+    implementer = [item for item in invocations if item[1] is AgentMode.EDIT]
+    reviewer = [item for item in invocations if item[1] is AgentMode.REVIEW]
+    assert implementer == [("codex", AgentMode.EDIT, "gpt-code", "high")]
+    assert reviewer == [("claude", AgentMode.REVIEW, "opus", "high")]
     assert result.final_state is not State.BACKLOG
 
 
@@ -649,6 +702,19 @@ def test_run_verify_with_spaces_and_backslashes_in_path(
         assert Path(argv[0]).is_absolute()
     else:
         assert all("\\" not in str(part) for part in argv)
+
+
+def test_run_verify_streams_and_preserves_final_output(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    _write_exec(
+        worktree / "scripts" / "verify",
+        ("#!/usr/bin/env bash\necho 00-preflight\nsleep 0.2\necho 40-test\n"),
+    )
+    activity: list[str] = []
+    passed, output = run_verify(worktree, activity.append)
+    assert passed is True
+    assert activity == ["00-preflight", "40-test"]
+    assert output == "00-preflight\n40-test\n"
 
 
 def test_windows_worktree_argv_uses_resolved_git_bash(
@@ -1015,6 +1081,7 @@ def test_resume_implementing_skips_implementer(
     assert any("IMPLEMENTING -> REVIEW" in item for item in result.messages)
     assert result.final_state is State.READY_TO_MERGE
     assert result.worktree is not None
+    assert read(_active(project)).frontmatter.runtime_selection is not None
     assert git("status", "--porcelain", cwd=result.worktree).stdout.strip() == ""
     head = git("rev-parse", "HEAD", cwd=result.worktree).stdout.strip()
     journal = git("show", f"{head}:.devflow/tasks/184.md", cwd=result.worktree).stdout

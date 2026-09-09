@@ -5,6 +5,7 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from devflow.authority import sanitized_env
 from devflow.lock import is_process_alive
+from devflow.taskfile import redact
 
 COMMANDS: dict[str, str] = {
     "cursor": "DEVFLOW_CURSOR_CMD",
@@ -52,6 +54,7 @@ class AgentResult:
     output: str
     detail: str | None
     duration_seconds: float
+    exit_code: int | None = None
 
 
 def _split_command(raw: str) -> list[str]:
@@ -140,11 +143,48 @@ def _build_command(
     agent: str,
     mode: AgentMode,
     prompt: str,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> list[str] | None:
     argv = _resolve_command(agent)
     if argv is None:
         return None
-    return [*argv, *_mode_flags(agent, mode, prompt)]
+    mode_flags = _mode_flags(agent, mode, prompt)
+    runtime_flags = _runtime_flags(agent, model, effort)
+    if agent == "codex":
+        # Codex runtime flags belong to `exec`, before mode-specific options.
+        return [*argv, mode_flags[0], *runtime_flags, *mode_flags[1:]]
+    return [*argv, *runtime_flags, *mode_flags]
+
+
+def _runtime_flags(agent: str, model: str | None, effort: str | None) -> list[str]:
+    if model is not None and not model.strip():
+        raise ValueError("model must not be empty")
+    if effort is not None and not effort.strip():
+        raise ValueError("effort must not be empty")
+    if agent == "codex":
+        if effort is not None and effort not in {"low", "medium", "high"}:
+            raise ValueError(f"unsupported codex effort: {effort}")
+        flags = ["--model", model] if model is not None else []
+        if effort is not None:
+            flags.extend(["--config", f'model_reasoning_effort="{effort}"'])
+        return flags
+    if agent == "claude":
+        if effort is not None and effort not in {
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
+            raise ValueError(f"unsupported claude effort: {effort}")
+        flags = ["--model", model] if model is not None else []
+        if effort is not None:
+            flags.extend(["--effort", effort])
+        return flags
+    if model is not None or effort is not None:
+        raise ValueError(f"{agent} does not support runtime overrides")
+    return []
 
 
 def terminate_tree(pid: int, grace_seconds: float = 5) -> None:
@@ -251,8 +291,17 @@ def classify_failure(exit_code: int, stderr: str) -> tuple[AgentStatus, str]:
     lowered = stderr.casefold()
     for pattern in RETRY_PATTERNS:
         if pattern.casefold() in lowered:
-            return AgentStatus.RETRY, pattern
-    return AgentStatus.BLOCKED, "blocked"
+            return AgentStatus.RETRY, _safe_failure_detail(exit_code, stderr)
+    return AgentStatus.BLOCKED, _safe_failure_detail(exit_code, stderr)
+
+
+def _safe_failure_detail(exit_code: int, stderr: str, limit: int = 2000) -> str:
+    """Return a bounded, secret-safe process diagnostic for terminal/journal use."""
+    cleaned = redact(stderr).strip()
+    if len(cleaned) > limit:
+        cleaned = cleaned[:limit].rstrip() + "\n...[truncated]..."
+    prefix = f"agent exited with code {exit_code}"
+    return f"{prefix}\n{cleaned}" if cleaned else prefix
 
 
 def run(
@@ -263,6 +312,9 @@ def run(
     timeout_minutes: float = 20,
     env: dict[str, str] | None = None,
     on_spawn: Callable[[int], None] | None = None,
+    on_activity: Callable[[str], None] | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> AgentResult:
     if agent not in COMMANDS:
         raise ValueError(f"unknown agent: {agent}")
@@ -274,13 +326,14 @@ def run(
     started = time.monotonic()
     env_name = COMMANDS[agent]
     prompt = prompt_file.read_text(encoding="utf-8")
-    argv = _build_command(agent, mode, prompt)
+    argv = _build_command(agent, mode, prompt, model=model, effort=effort)
     if argv is None:
         return AgentResult(
             status=AgentStatus.BLOCKED,
             output="",
             detail=f"{agent} command not configured (set {env_name})",
             duration_seconds=time.monotonic() - started,
+            exit_code=None,
         )
 
     timeout_seconds = timeout_minutes * 60
@@ -300,12 +353,43 @@ def run(
     proc = subprocess.Popen(argv, **popen_kwargs)  # type: ignore[call-overload]
     if on_spawn is not None:
         on_spawn(proc.pid)
+    if on_activity is not None:
+        stdout_parts: list[bytes] = []
+        stderr_parts: list[bytes] = []
+        readers = [
+            threading.Thread(
+                target=_read_pipe,
+                args=(proc.stdout, stdout_parts, None),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_read_pipe,
+                args=(proc.stderr, stderr_parts, on_activity),
+                daemon=True,
+            ),
+        ]
+        for reader in readers:
+            reader.start()
     try:
-        stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
+        if on_activity is None:
+            stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
+        else:
+            proc.wait(timeout=timeout_seconds)
+            for reader in readers:
+                reader.join(timeout=1)
+            stdout_b = b"".join(stdout_parts)
+            stderr_b = b"".join(stderr_parts)
     except subprocess.TimeoutExpired:
         terminate_tree(proc.pid)
         try:
-            stdout_b, stderr_b = proc.communicate(timeout=1)
+            if on_activity is None:
+                stdout_b, stderr_b = proc.communicate(timeout=1)
+            else:
+                proc.wait(timeout=1)
+                for reader in readers:
+                    reader.join(timeout=1)
+                stdout_b = b"".join(stdout_parts)
+                stderr_b = b"".join(stderr_parts)
         except subprocess.TimeoutExpired:
             stdout_b, stderr_b = b"", b""
         if is_process_alive(proc.pid):
@@ -319,13 +403,19 @@ def run(
                 output="",
                 detail="agent output is not valid UTF-8",
                 duration_seconds=time.monotonic() - started,
+                exit_code=proc.returncode,
             )
         return AgentResult(
             status=AgentStatus.BLOCKED,
             output=stdout_text,
             detail=term_detail,
             duration_seconds=time.monotonic() - started,
+            exit_code=proc.returncode,
         )
+    except KeyboardInterrupt:
+        terminate_tree(proc.pid)
+        proc.wait(timeout=1)
+        raise
 
     decoded = _decode_agent_pipes(stdout_b, stderr_b)
     stdout_text, stderr_text = decoded
@@ -335,6 +425,7 @@ def run(
             output="",
             detail="agent output is not valid UTF-8",
             duration_seconds=time.monotonic() - started,
+            exit_code=proc.returncode,
         )
     duration = time.monotonic() - started
     if proc.returncode == 0:
@@ -343,6 +434,7 @@ def run(
             output=stdout_text,
             detail=None,
             duration_seconds=duration,
+            exit_code=0,
         )
     status, detail = classify_failure(proc.returncode or 1, stderr_text)
     return AgentResult(
@@ -350,7 +442,31 @@ def run(
         output=stdout_text,
         detail=detail,
         duration_seconds=duration,
+        exit_code=proc.returncode,
     )
+
+
+def _read_pipe(
+    pipe: object,
+    parts: list[bytes],
+    on_activity: Callable[[str], None] | None,
+) -> None:
+    if pipe is None or not hasattr(pipe, "readline"):
+        return
+    while True:
+        chunk = pipe.readline()
+        if not chunk:
+            return
+        if isinstance(chunk, str):
+            raw = chunk.encode("utf-8")
+        else:
+            raw = bytes(chunk)
+        parts.append(raw)
+        if on_activity is None:
+            continue
+        safe = redact(raw.decode("utf-8", errors="replace")).strip()
+        if safe:
+            on_activity(safe[:1000])
 
 
 def _decode_agent_pipes(
@@ -373,6 +489,8 @@ def run_with_retry(
     max_attempts: int = 3,
     timeout_minutes: float = 20,
     sleep_fn: Callable[[float], None] = time.sleep,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> AgentResult:
     last: AgentResult | None = None
     for attempt in range(max_attempts):
@@ -382,6 +500,8 @@ def run_with_retry(
             worktree,
             mode,
             timeout_minutes=timeout_minutes,
+            model=model,
+            effort=effort,
         )
         if last.status is not AgentStatus.RETRY:
             return last
@@ -394,4 +514,5 @@ def run_with_retry(
         output=last.output,
         detail=f"retry exhausted after {max_attempts} attempts: {last.detail}",
         duration_seconds=last.duration_seconds,
+        exit_code=last.exit_code,
     )

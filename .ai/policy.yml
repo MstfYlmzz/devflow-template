@@ -29,6 +29,7 @@ routing:
   # Use Codex for triage and implementation in this repository.
   # Restore triage/LOW/MEDIUM to Cursor when the Cursor adapter is available.
   triage: codex
+  reviewer: claude
   complexity:
     LOW: codex
     MEDIUM: codex

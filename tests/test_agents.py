@@ -4,12 +4,14 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from devflow.agents import (
     AgentMode,
+    AgentResult,
     AgentStatus,
     _build_command,
     _defined_modes,
@@ -117,6 +119,39 @@ def test_run_unknown_stderr_is_blocked(
     )
     result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
     assert result.status is AgentStatus.BLOCKED
+    assert result.output == ""
+    assert result.exit_code == 1
+    assert result.detail == "agent exited with code 1\nsomething went boom"
+
+
+def test_failure_diagnostic_is_redacted_and_truncated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    secret = "sk-" + ("a" * 48)
+    _set_cursor(
+        monkeypatch,
+        _script(
+            tmp_path,
+            "secret.py",
+            (
+                "import sys\n"
+                "sys.stderr.write("
+                f"'authentication failed {secret}\\n' + 'word ' * 1000"
+                ")\n"
+                "sys.exit(7)\n"
+            ),
+        ),
+    )
+    result = run("cursor", prompt, worktree, AgentMode.READ_ONLY)
+    assert result.status is AgentStatus.BLOCKED
+    assert result.output == ""
+    assert result.exit_code == 7
+    assert result.detail is not None
+    assert secret not in result.detail
+    assert "[REDACTED]" in result.detail
+    assert result.detail.startswith("agent exited with code 7")
+    assert result.detail.endswith("...[truncated]...")
 
 
 def test_run_timeout_kills_process(
@@ -183,6 +218,28 @@ def test_run_unconfigured_command_is_blocked(
     assert result.status is AgentStatus.BLOCKED
     assert result.detail is not None
     assert "cursor command not configured (set DEVFLOW_CURSOR_CMD)" in result.detail
+
+
+def test_agent_smoke_does_not_report_permission_ok_when_agent_is_blocked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devflow.cli import _cmd_agent_smoke
+
+    monkeypatch.setattr(
+        "devflow.cli.run",
+        lambda *args, **kwargs: AgentResult(
+            AgentStatus.BLOCKED,
+            "",
+            "claude command not configured (set DEVFLOW_CLAUDE_CMD)",
+            0.0,
+        ),
+    )
+    assert _cmd_agent_smoke(agent="claude") == 1
+    output = capsys.readouterr().out
+    assert "claude: BLOCKED" in output
+    assert "command not configured" in output
+    assert "read_only: file unchanged — OK" not in output
+    assert "permission model verified" not in output
 
 
 def test_retry_then_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,6 +406,59 @@ def test_codex_edit_command(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "danger-full-access" not in argv
 
 
+def test_codex_command_applies_model_and_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CODEX_CMD", "codex")
+    argv = _build_command(
+        "codex",
+        AgentMode.EDIT,
+        "fix the bug",
+        model="gpt-example",
+        effort="high",
+    )
+    assert argv is not None
+    assert argv[:7] == [
+        "codex",
+        "exec",
+        "--model",
+        "gpt-example",
+        "--config",
+        'model_reasoning_effort="high"',
+        "--approve-for-me",
+    ]
+
+
+def test_claude_command_applies_model_and_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CLAUDE_CMD", "claude")
+    argv = _build_command(
+        "claude",
+        AgentMode.REVIEW,
+        "review this",
+        model="opus",
+        effort="xhigh",
+    )
+    assert argv is not None
+    assert argv[:5] == ["claude", "--model", "opus", "--effort", "xhigh"]
+    assert "-p" in argv
+
+
+def test_unsupported_effort_fails_without_silent_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CODEX_CMD", "codex")
+    with pytest.raises(ValueError, match="unsupported codex effort: xhigh"):
+        _build_command(
+            "codex",
+            AgentMode.EDIT,
+            "fix",
+            model="gpt-example",
+            effort="xhigh",
+        )
+
+
 def test_codex_defined_modes() -> None:
     assert _defined_modes("codex") == (AgentMode.READ_ONLY, AgentMode.EDIT)
     assert AgentMode.REVIEW not in _defined_modes("codex")
@@ -472,6 +582,59 @@ def test_failure_classifies_stderr_not_merged_into_output(
     assert result.output == "partial\n"
     assert result.detail is not None
     assert "rate limit" in result.detail.casefold()
+
+
+def test_stderr_activity_streams_before_process_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    secret = "sk-" + ("z" * 48)
+    _set_cursor(
+        monkeypatch,
+        _script(
+            tmp_path,
+            "stream.py",
+            (
+                "import sys, time\n"
+                f"sys.stderr.write('working {secret}\\n')\n"
+                "sys.stderr.flush()\n"
+                "time.sleep(0.3)\n"
+                "sys.stderr.write('done\\n')\n"
+                "sys.stdout.write('FINAL\\n')\n"
+            ),
+        ),
+    )
+    activity: list[str] = []
+    first = threading.Event()
+    result: list[object] = []
+
+    def on_activity(line: str) -> None:
+        activity.append(line)
+        first.set()
+
+    worker = threading.Thread(
+        target=lambda: result.append(
+            run(
+                "cursor",
+                prompt,
+                worktree,
+                AgentMode.READ_ONLY,
+                on_activity=on_activity,
+            )
+        )
+    )
+    worker.start()
+    assert first.wait(timeout=2)
+    assert worker.is_alive()
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    assert secret not in "\n".join(activity)
+    assert "[REDACTED]" in activity[0]
+    assert activity[-1] == "done"
+    assert len(result) == 1
+    agent_result = result[0]
+    assert getattr(agent_result, "status") is AgentStatus.OK
+    assert getattr(agent_result, "output").splitlines() == ["FINAL"]
 
 
 def test_run_preserves_utf8_unicode(

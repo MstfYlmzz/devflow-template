@@ -11,11 +11,13 @@ from pathlib import Path
 from devflow.agents import (
     COMMANDS,
     AgentMode,
+    AgentStatus,
     _defined_modes,
     _resolve_command,
     run,
 )
 from devflow.authority import load_policy_from_base
+from devflow.capabilities import ProviderCapabilities, discover_all
 from devflow.ci_checks import changed_files, ci_checks_report, needs_fast_lane
 from devflow.freshness import (
     check_code_freshness,
@@ -52,6 +54,8 @@ from devflow.policy import (
     fast_lane_eligible,
     load_policy,
     needed_triage_fields,
+    review_provider,
+    triage_provider,
     validate_policy,
 )
 from devflow.runner import (
@@ -63,6 +67,7 @@ from devflow.runner import (
     start,
     stop,
 )
+from devflow.runtime import RUNTIME_ROLES, RuntimeChoice, RuntimeSelection
 from devflow.states import (
     InvalidTransition,
     State,
@@ -433,6 +438,41 @@ def _cmd_agent_check() -> int:
     return 1 if missing else 0
 
 
+def _cmd_models(*, refresh: bool) -> int:
+    # Discovery is deliberately uncached in V1; --refresh is accepted so adding
+    # a cache later will not require a CLI contract change.
+    _ = refresh
+    for index, capabilities in enumerate(discover_all()):
+        if index:
+            print()
+        print(capabilities.provider.upper())
+        print(f"  {'CLI':<12}{capabilities.command or '(not configured)'}")
+        print(f"  {'configured':<12}{'yes' if capabilities.configured else 'no'}")
+        print(f"  {'available':<12}{'yes' if capabilities.available else 'no'}")
+        print()
+        print("  models")
+        if capabilities.models:
+            for model in capabilities.models:
+                print(f"    {model}")
+        elif capabilities.supports_model_override:
+            print("    catalogue unavailable (provider default)")
+        else:
+            print("    model override unavailable")
+        print()
+        print("  effort")
+        if capabilities.efforts:
+            for effort in capabilities.efforts:
+                print(f"    {effort}")
+        elif capabilities.available:
+            print("    provider-managed")
+        else:
+            print("    unavailable")
+        if capabilities.diagnostic:
+            print()
+            print(f"  diagnostic  {capabilities.diagnostic}")
+    return 0
+
+
 _SMOKE_SOURCE = "def add(a, b):\n    return a - b\n"
 _SMOKE_PROMPT = "fix the bug"
 
@@ -483,7 +523,11 @@ def _cmd_agent_smoke(*, agent: str) -> int:
             check=True,
         )
 
-        run(agent, prompt_file, worktree, AgentMode.READ_ONLY)
+        read_result = run(agent, prompt_file, worktree, AgentMode.READ_ONLY)
+        if read_result.status is not AgentStatus.OK:
+            print(f"{agent}: {read_result.status.value.upper()}")
+            print(read_result.detail or "agent unavailable")
+            return 1
         read_only_ok = (
             target.is_file() and target.read_text(encoding="utf-8") == _SMOKE_SOURCE
         )
@@ -493,7 +537,11 @@ def _cmd_agent_smoke(*, agent: str) -> int:
             print("read_only: file modified — FAIL")
 
         target.write_text(_SMOKE_SOURCE, encoding="utf-8")
-        run(agent, prompt_file, worktree, AgentMode.EDIT)
+        edit_result = run(agent, prompt_file, worktree, AgentMode.EDIT)
+        if edit_result.status is not AgentStatus.OK:
+            print(f"{agent}: {edit_result.status.value.upper()}")
+            print(edit_result.detail or "agent unavailable")
+            return 1
         edit_ok = (
             target.is_file() and target.read_text(encoding="utf-8") != _SMOKE_SOURCE
         )
@@ -577,6 +625,24 @@ def _cmd_task_show(*, task_id: int) -> int:
     print()
     print(f"sections: {sections_text}")
     print(f"doc impact: {impact_text}")
+    print()
+    print("runtime:")
+    runtime_providers = {
+        "triage": triage_provider(policy),
+        "implementer": decision.implementer,
+        "reviewer": review_provider(policy),
+    }
+    for role in RUNTIME_ROLES:
+        choice = (
+            fm.runtime_selection.for_role(role)
+            if fm.runtime_selection is not None
+            else RuntimeChoice()
+        )
+        print(
+            f"  {role:<12}{runtime_providers[role]} · "
+            f"{choice.model or 'provider default'} · "
+            f"{choice.effort or 'provider-managed'}"
+        )
     return 0
 
 
@@ -929,6 +995,9 @@ def _cmd_start(
             print(f"invalid risk: {risk_arg}", file=sys.stderr)
             return 2
     try:
+        runtime_selector = None
+        if not dry_run and sys.stdin.isatty() and sys.stdout.isatty():
+            runtime_selector = _interactive_runtime_selector
         result = start(
             repo_root(),
             task_id,
@@ -937,11 +1006,84 @@ def _cmd_start(
             review_advisory=review == "advisory",
             reason=reason,
             dry_run=dry_run,
+            runtime_selector=runtime_selector,
         )
     except (RunnerError, OSError, ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     return _start_exit(result)
+
+
+def _interactive_runtime_selector(
+    decision: RoutingDecision,
+    providers: dict[str, str],
+    recommended: RuntimeSelection,
+    capabilities: dict[str, ProviderCapabilities],
+) -> RuntimeSelection:
+    _ = decision
+    print()
+    print("AI Runtime")
+    for role in RUNTIME_ROLES:
+        choice = recommended.for_role(role)
+        print(
+            f"  {role:<12}{providers[role]} · "
+            f"{choice.model or 'provider default'} · "
+            f"{choice.effort or 'provider-managed'}"
+        )
+    while True:
+        action = input("Enter  Continue    C  Configure: ").strip().casefold()
+        if not action:
+            return recommended
+        if action == "c":
+            break
+        print("Choose Enter or C.")
+
+    selected: dict[str, RuntimeChoice] = {}
+    for role in RUNTIME_ROLES:
+        provider = providers[role]
+        capability = capabilities[provider]
+        default = recommended.for_role(role)
+        print()
+        print(role.capitalize())
+        print(f"  Provider  {provider} (policy controlled)")
+        if capability.models:
+            print("  Models")
+            for index, listed_model in enumerate(capability.models, start=1):
+                print(f"    {index}. {listed_model}")
+        elif capability.supports_model_override:
+            print(
+                "  Models    catalogue unavailable; enter an exact model or leave blank"
+            )
+        else:
+            print("  Model     provider default (override unavailable)")
+        model: str | None = default.model
+        if capability.supports_model_override:
+            raw_model = input("  Model [provider default]: ").strip()
+            if raw_model:
+                if raw_model.isdigit() and capability.models:
+                    index = int(raw_model)
+                    if not 1 <= index <= len(capability.models):
+                        raise ValueError(
+                            f"invalid {provider} model choice: {raw_model}"
+                        )
+                    model = capability.models[index - 1]
+                else:
+                    model = raw_model
+
+        effort = default.effort
+        if capability.efforts:
+            shown = "/".join(capability.efforts)
+            raw_effort = input(
+                f"  Effort [{effort or 'provider-managed'}] ({shown}): "
+            ).strip()
+            if raw_effort:
+                if raw_effort not in capability.efforts:
+                    raise ValueError(f"unsupported {provider} effort: {raw_effort}")
+                effort = raw_effort
+        else:
+            print("  Effort    provider-managed")
+        selected[role] = RuntimeChoice(model=model, effort=effort)
+    return RuntimeSelection(**selected)
 
 
 def _cmd_approve(
@@ -1059,6 +1201,8 @@ def main() -> None:
 
     sub.add_parser("doctor")
     sub.add_parser("agent-check")
+    models_parser = sub.add_parser("models")
+    models_parser.add_argument("--refresh", action="store_true")
 
     smoke_parser = sub.add_parser("agent-smoke")
     smoke_parser.add_argument("--agent", required=True, choices=list(COMMANDS))
@@ -1135,6 +1279,8 @@ def main() -> None:
         raise SystemExit(_cmd_ci_checks(base=args.base))
     if args.command == "agent-check":
         raise SystemExit(_cmd_agent_check())
+    if args.command == "models":
+        raise SystemExit(_cmd_models(refresh=args.refresh))
     if args.command == "agent-smoke":
         raise SystemExit(_cmd_agent_smoke(agent=args.agent))
     if args.command == "recover":
