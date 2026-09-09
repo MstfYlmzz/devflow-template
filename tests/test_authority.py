@@ -22,6 +22,7 @@ _MIN_POLICY = {
     "floor": {},
     "signal_floor": {},
     "routing": {
+        "triage": "cursor",
         "complexity": {"LOW": "cursor", "MEDIUM": "cursor", "HIGH": "codex"},
         "risk": {
             "LOW": {"plan_approval": False, "review": False, "evidence": False},

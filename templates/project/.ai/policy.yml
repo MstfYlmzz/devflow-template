@@ -98,6 +98,7 @@ signal_floor:
   unfamiliar_area: MEDIUM
 
 routing:
+  triage: cursor
   complexity:
     LOW: cursor
     MEDIUM: cursor

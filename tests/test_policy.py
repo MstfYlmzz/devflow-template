@@ -455,6 +455,29 @@ def test_repo_policy_has_complete_risk_table() -> None:
     assert validate_policy(policy) == []
 
 
+def test_known_agents_match_commands() -> None:
+    from devflow.agents import COMMANDS
+    from devflow.policy import _KNOWN_AGENTS
+
+    assert _KNOWN_AGENTS == frozenset(COMMANDS)
+
+
+def test_validate_policy_requires_triage() -> None:
+    policy = copy.deepcopy(_policy())
+    policy["reviewed_for_this_project"] = True
+    del policy["routing"]["triage"]
+    errors = validate_policy(policy)
+    assert any("routing.triage is required" in item for item in errors)
+
+
+def test_validate_policy_rejects_unknown_triage() -> None:
+    policy = copy.deepcopy(_policy())
+    policy["reviewed_for_this_project"] = True
+    policy["routing"]["triage"] = "banana"
+    errors = validate_policy(policy)
+    assert any("routing.triage unknown agent: banana" in item for item in errors)
+
+
 def test_epic_high_without_floor() -> None:
     policy = _policy()
     floor = apply_floor(["src/orders/service.py"], [], policy)

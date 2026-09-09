@@ -45,6 +45,8 @@ def test_init_creates_expected_files(git_repo: Path) -> None:
     assert ".devflow/locks/" in gitignore
     assert ".devflow/worktrees/" in gitignore
     assert ".venv/" in gitignore
+    policy_text = (git_repo / ".ai" / "policy.yml").read_text(encoding="utf-8")
+    assert "triage: cursor" in policy_text
 
 
 def test_init_requires_git_repo(tmp_path: Path) -> None:
