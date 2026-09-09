@@ -444,10 +444,15 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
     complexity_table = routing.get("complexity")
     risk_table = routing.get("risk")
     triage = routing.get("triage")
+    reviewer = routing.get("reviewer", "claude")
     if not isinstance(triage, str) or not triage.strip():
         errors.append("routing.triage is required")
     elif triage.strip() not in _KNOWN_AGENTS:
         errors.append(f"routing.triage unknown agent: {triage.strip()}")
+    if reviewer != "claude":
+        errors.append(
+            "routing.reviewer must be claude (independent reviewer invariant)"
+        )
     if not isinstance(complexity_table, dict):
         errors.append("routing table missing complexity levels")
     else:
@@ -492,3 +497,16 @@ def triage_provider(policy: dict[str, Any]) -> str:
     if agent not in _KNOWN_AGENTS:
         raise ValueError(f"routing.triage unknown agent: {agent}")
     return agent
+
+
+def review_provider(policy: dict[str, Any]) -> str:
+    """Return the policy reviewer while enforcing independent review."""
+    routing = policy.get("routing") or {}
+    if not isinstance(routing, dict):
+        raise ValueError("routing.reviewer must be claude")
+    raw = routing.get("reviewer", "claude")
+    if raw != "claude":
+        raise ValueError(
+            "routing.reviewer must be claude (independent reviewer invariant)"
+        )
+    return "claude"

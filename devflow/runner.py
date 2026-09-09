@@ -53,6 +53,7 @@ from devflow.policy import (
     check_merge_gate,
     decide,
     needed_triage_fields,
+    review_provider,
     triage_provider,
 )
 from devflow.prompts import build_prompt
@@ -1681,8 +1682,7 @@ def _runtime_providers(
     return {
         "triage": triage_provider(policy),
         "implementer": decision.implementer,
-        # Independent review is intentionally fixed to Claude in V1.
-        "reviewer": "claude",
+        "reviewer": review_provider(policy),
     }
 
 
@@ -1767,7 +1767,11 @@ def _applicable_runtime(
                 ),
             )
             model = None
-        if effort is not None and effort not in capability.efforts:
+        if (
+            effort is not None
+            and capability.available
+            and effort not in capability.efforts
+        ):
             _emit(
                 messages,
                 task_id,

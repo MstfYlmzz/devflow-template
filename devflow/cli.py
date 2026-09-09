@@ -54,6 +54,8 @@ from devflow.policy import (
     fast_lane_eligible,
     load_policy,
     needed_triage_fields,
+    review_provider,
+    triage_provider,
     validate_policy,
 )
 from devflow.runner import (
@@ -623,6 +625,24 @@ def _cmd_task_show(*, task_id: int) -> int:
     print()
     print(f"sections: {sections_text}")
     print(f"doc impact: {impact_text}")
+    print()
+    print("runtime:")
+    runtime_providers = {
+        "triage": triage_provider(policy),
+        "implementer": decision.implementer,
+        "reviewer": review_provider(policy),
+    }
+    for role in RUNTIME_ROLES:
+        choice = (
+            fm.runtime_selection.for_role(role)
+            if fm.runtime_selection is not None
+            else RuntimeChoice()
+        )
+        print(
+            f"  {role:<12}{runtime_providers[role]} · "
+            f"{choice.model or 'provider default'} · "
+            f"{choice.effort or 'provider-managed'}"
+        )
     return 0
 
 

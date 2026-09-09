@@ -11,6 +11,7 @@ import pytest
 
 from devflow.agents import (
     AgentMode,
+    AgentResult,
     AgentStatus,
     _build_command,
     _defined_modes,
@@ -217,6 +218,28 @@ def test_run_unconfigured_command_is_blocked(
     assert result.status is AgentStatus.BLOCKED
     assert result.detail is not None
     assert "cursor command not configured (set DEVFLOW_CURSOR_CMD)" in result.detail
+
+
+def test_agent_smoke_does_not_report_permission_ok_when_agent_is_blocked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devflow.cli import _cmd_agent_smoke
+
+    monkeypatch.setattr(
+        "devflow.cli.run",
+        lambda *args, **kwargs: AgentResult(
+            AgentStatus.BLOCKED,
+            "",
+            "claude command not configured (set DEVFLOW_CLAUDE_CMD)",
+            0.0,
+        ),
+    )
+    assert _cmd_agent_smoke(agent="claude") == 1
+    output = capsys.readouterr().out
+    assert "claude: BLOCKED" in output
+    assert "command not configured" in output
+    assert "read_only: file unchanged — OK" not in output
+    assert "permission model verified" not in output
 
 
 def test_retry_then_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
