@@ -4,6 +4,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -505,6 +506,59 @@ def test_failure_classifies_stderr_not_merged_into_output(
     assert result.output == "partial\n"
     assert result.detail is not None
     assert "rate limit" in result.detail.casefold()
+
+
+def test_stderr_activity_streams_before_process_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt, worktree = _prompt_and_tree(tmp_path)
+    secret = "sk-" + ("z" * 48)
+    _set_cursor(
+        monkeypatch,
+        _script(
+            tmp_path,
+            "stream.py",
+            (
+                "import sys, time\n"
+                f"sys.stderr.write('working {secret}\\n')\n"
+                "sys.stderr.flush()\n"
+                "time.sleep(0.3)\n"
+                "sys.stderr.write('done\\n')\n"
+                "sys.stdout.write('FINAL\\n')\n"
+            ),
+        ),
+    )
+    activity: list[str] = []
+    first = threading.Event()
+    result: list[object] = []
+
+    def on_activity(line: str) -> None:
+        activity.append(line)
+        first.set()
+
+    worker = threading.Thread(
+        target=lambda: result.append(
+            run(
+                "cursor",
+                prompt,
+                worktree,
+                AgentMode.READ_ONLY,
+                on_activity=on_activity,
+            )
+        )
+    )
+    worker.start()
+    assert first.wait(timeout=2)
+    assert worker.is_alive()
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    assert secret not in "\n".join(activity)
+    assert "[REDACTED]" in activity[0]
+    assert activity[-1] == "done"
+    assert len(result) == 1
+    agent_result = result[0]
+    assert getattr(agent_result, "status") is AgentStatus.OK
+    assert getattr(agent_result, "output").splitlines() == ["FINAL"]
 
 
 def test_run_preserves_utf8_unicode(

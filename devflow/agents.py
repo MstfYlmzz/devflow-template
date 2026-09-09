@@ -5,6 +5,7 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -274,6 +275,7 @@ def run(
     timeout_minutes: float = 20,
     env: dict[str, str] | None = None,
     on_spawn: Callable[[int], None] | None = None,
+    on_activity: Callable[[str], None] | None = None,
 ) -> AgentResult:
     if agent not in COMMANDS:
         raise ValueError(f"unknown agent: {agent}")
@@ -312,12 +314,43 @@ def run(
     proc = subprocess.Popen(argv, **popen_kwargs)  # type: ignore[call-overload]
     if on_spawn is not None:
         on_spawn(proc.pid)
+    if on_activity is not None:
+        stdout_parts: list[bytes] = []
+        stderr_parts: list[bytes] = []
+        readers = [
+            threading.Thread(
+                target=_read_pipe,
+                args=(proc.stdout, stdout_parts, None),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_read_pipe,
+                args=(proc.stderr, stderr_parts, on_activity),
+                daemon=True,
+            ),
+        ]
+        for reader in readers:
+            reader.start()
     try:
-        stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
+        if on_activity is None:
+            stdout_b, stderr_b = proc.communicate(timeout=timeout_seconds)
+        else:
+            proc.wait(timeout=timeout_seconds)
+            for reader in readers:
+                reader.join(timeout=1)
+            stdout_b = b"".join(stdout_parts)
+            stderr_b = b"".join(stderr_parts)
     except subprocess.TimeoutExpired:
         terminate_tree(proc.pid)
         try:
-            stdout_b, stderr_b = proc.communicate(timeout=1)
+            if on_activity is None:
+                stdout_b, stderr_b = proc.communicate(timeout=1)
+            else:
+                proc.wait(timeout=1)
+                for reader in readers:
+                    reader.join(timeout=1)
+                stdout_b = b"".join(stdout_parts)
+                stderr_b = b"".join(stderr_parts)
         except subprocess.TimeoutExpired:
             stdout_b, stderr_b = b"", b""
         if is_process_alive(proc.pid):
@@ -340,6 +373,10 @@ def run(
             duration_seconds=time.monotonic() - started,
             exit_code=proc.returncode,
         )
+    except KeyboardInterrupt:
+        terminate_tree(proc.pid)
+        proc.wait(timeout=1)
+        raise
 
     decoded = _decode_agent_pipes(stdout_b, stderr_b)
     stdout_text, stderr_text = decoded
@@ -368,6 +405,29 @@ def run(
         duration_seconds=duration,
         exit_code=proc.returncode,
     )
+
+
+def _read_pipe(
+    pipe: object,
+    parts: list[bytes],
+    on_activity: Callable[[str], None] | None,
+) -> None:
+    if pipe is None or not hasattr(pipe, "readline"):
+        return
+    while True:
+        chunk = pipe.readline()
+        if not chunk:
+            return
+        if isinstance(chunk, str):
+            raw = chunk.encode("utf-8")
+        else:
+            raw = bytes(chunk)
+        parts.append(raw)
+        if on_activity is None:
+            continue
+        safe = redact(raw.decode("utf-8", errors="replace")).strip()
+        if safe:
+            on_activity(safe[:1000])
 
 
 def _decode_agent_pipes(

@@ -651,6 +651,19 @@ def test_run_verify_with_spaces_and_backslashes_in_path(
         assert all("\\" not in str(part) for part in argv)
 
 
+def test_run_verify_streams_and_preserves_final_output(tmp_path: Path) -> None:
+    worktree = tmp_path / "worktree"
+    _write_exec(
+        worktree / "scripts" / "verify",
+        ("#!/usr/bin/env bash\necho 00-preflight\nsleep 0.2\necho 40-test\n"),
+    )
+    activity: list[str] = []
+    passed, output = run_verify(worktree, activity.append)
+    assert passed is True
+    assert activity == ["00-preflight", "40-test"]
+    assert output == "00-preflight\n40-test\n"
+
+
 def test_windows_worktree_argv_uses_resolved_git_bash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

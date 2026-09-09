@@ -6,7 +6,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -437,10 +439,47 @@ def _run_worktree_script(
     )
 
 
-def run_verify(worktree: Path) -> tuple[bool, str]:
+def run_verify(
+    worktree: Path, on_output: Callable[[str], None] | None = None
+) -> tuple[bool, str]:
     script = worktree / "scripts" / "verify"
     if not script.is_file():
         return False, "scripts/verify not found"
+    if on_output is None and sys.stdin.isatty() and sys.stdout.isatty():
+
+        def emit_verify_line(line: str) -> None:
+            print(f"  verify: {line}", flush=True)
+
+        on_output = emit_verify_line
+    if on_output is not None:
+        argv = _worktree_script_argv("scripts/verify")
+        kwargs: dict[str, object] = {
+            "cwd": worktree,
+            "shell": False,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(argv, **kwargs)  # type: ignore[call-overload]
+        lines: list[str] = []
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                lines.append(line)
+                on_output(line.rstrip())
+            code = proc.wait()
+        except KeyboardInterrupt:
+            terminate_tree(proc.pid)
+            proc.wait(timeout=1)
+            raise
+        return code == 0, "".join(lines)
     result = _run_worktree_script(worktree, "scripts/verify")
     return result.returncode == 0, f"{result.stdout}{result.stderr}"
 
@@ -1452,10 +1491,13 @@ def _run_agent(
     task_path: Path,
 ) -> AgentResult:
     prompt_file = _write_prompt(prompt)
+    activity = _terminal_activity(task_id, f"{agent} {mode.value}")
     try:
 
         def on_spawn(pid: int) -> None:
             set_agent_pid(task_id, repo, pid)
+            if activity is not None:
+                activity(f"started · pid {pid}")
 
         result = agents_api.run(
             agent,
@@ -1465,6 +1507,7 @@ def _run_agent(
             timeout_minutes=timeout,
             env=sanitized_env(),
             on_spawn=on_spawn,
+            on_activity=activity,
         )
     finally:
         set_agent_pid(task_id, repo, None)
@@ -1598,6 +1641,17 @@ def _emit(messages: list[str], task_id: int, line: str) -> None:
     text = f"{task_id}: {line}"
     messages.append(text)
     print(text, flush=True)
+
+
+def _terminal_activity(task_id: int, phase: str) -> Callable[[str], None] | None:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+
+    def emit(line: str) -> None:
+        if line:
+            print(f"{task_id}:   {phase}: {line}", flush=True)
+
+    return emit
 
 
 def _emit_agent_result(
