@@ -666,13 +666,17 @@ def _implement_onward(
         tf = _apply(
             path, State.IMPLEMENTING, Trigger.IMPLEMENT_DONE, decision, messages
         )
-        _ready_report(tf, decision, True, 0, True, gate, messages)
+        _ready_report(tf, decision, True, 0, True, gate, messages, worktree)
         return StartResult(
             task_id, State(tf.frontmatter.state), worktree, True, None, messages
         )
 
     tf = _apply(path, State.IMPLEMENTING, Trigger.IMPLEMENT_DONE, decision, messages)
-    record, tf = _run_review(repo, path, tf, worktree, head, timeout, messages)
+    record, tf = _run_review(
+        repo, path, tf, worktree, head, timeout, messages, decision
+    )
+    if State(tf.frontmatter.state) is State.BLOCKED:
+        return StartResult(task_id, State.BLOCKED, worktree, True, None, messages)
     blocking = 0 if record is None else record.blocking_findings
     if record is not None and blocking and not review_advisory:
         tf = _apply(
@@ -695,7 +699,7 @@ def _implement_onward(
         )
     elif State(tf.frontmatter.state) is State.REVIEW:
         tf = _apply(path, State.REVIEW, Trigger.REVIEW_CLEAN, decision, messages)
-    _ready_report(tf, decision, True, blocking, True, gate, messages)
+    _ready_report(tf, decision, True, blocking, True, gate, messages, worktree)
     return StartResult(
         task_id, State(tf.frontmatter.state), worktree, True, record, messages
     )
@@ -871,6 +875,7 @@ def _run_review(
     head_sha: str,
     timeout: float,
     messages: list[str],
+    decision: RoutingDecision,
 ) -> tuple[ReviewRecord | None, TaskFile]:
     task_id = tf.frontmatter.id
     round_no = len(tf.frontmatter.review_records) + 1
@@ -894,53 +899,77 @@ def _run_review(
             "previous_findings": previous,
         },
     )
-    review_wt = gitops.add_review_worktree(repo, task_id, round_no, head_sha)
-    result = _run_agent(
-        repo, task_id, "claude", prompt, review_wt, AgentMode.REVIEW, timeout, path
-    )
-    _emit(
-        messages,
-        task_id,
-        f"reviewer (claude, review)... {int(result.duration_seconds)}s",
-    )
-    findings = parse_findings(result.output) if result.output.strip() else []
-    blocking = sum(1 for item in findings if item.blocking)
-    unverified = sum(
-        1
-        for item in findings
-        if not item.verified and item.severity in {"BLOCKER", "HIGH"}
-    )
-    _emit(messages, task_id, f"{blocking} blocking, {unverified} unverified HIGH")
-    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
-    record = ReviewRecord(
-        head_sha=head_sha,
-        base_sha=base_sha,
-        round=round_no,
-        blocking_findings=blocking,
-        unverified_high=unverified,
-        timestamp=stamp,
-    )
-    records = [*tf.frontmatter.review_records, record]
-    tf = update_frontmatter(path, review_records=records)
-    if findings:
-        dumped = yaml.safe_dump(
-            [
-                {
-                    "id": item.id,
-                    "severity": item.severity,
-                    "verified": item.verified,
-                    "blocking": item.blocking,
-                    "problem": item.problem,
-                }
-                for item in findings
-            ],
-            sort_keys=False,
+    review_wt: Path | None = None
+    try:
+        review_wt = gitops.add_review_worktree(repo, task_id, round_no, head_sha)
+        result = _run_agent(
+            repo, task_id, "claude", prompt, review_wt, AgentMode.REVIEW, timeout, path
         )
-        tf = append_section(path, f"Review — round {round_no}", dumped)
-    _copy_review_evidence(worktree, review_wt, head_sha, round_no)
-    gitops.remove_worktree(repo, review_wt)
-    gitops.delete_local_branch(repo, f"review/{task_id}-r{round_no}")
-    return record, tf
+        _emit(
+            messages,
+            task_id,
+            f"reviewer (claude, review)... {int(result.duration_seconds)}s",
+        )
+        if result.status is not AgentStatus.OK:
+            detail = result.detail or result.status.value
+            append_section(
+                path,
+                "Review error",
+                f"status: {result.status.value}\ndetail: {detail}\n",
+            )
+            tf = _block(path, State.REVIEW, "REVIEWER_UNAVAILABLE", decision, messages)
+            return None, tf
+        try:
+            findings = parse_findings(result.output) if result.output.strip() else []
+        except (ValueError, yaml.YAMLError) as exc:
+            append_section(
+                path,
+                "Review error",
+                f"status: {result.status.value}\ndetail: {exc}\n",
+            )
+            tf = _block(
+                path, State.REVIEW, "REVIEWER_INVALID_OUTPUT", decision, messages
+            )
+            return None, tf
+        blocking = sum(1 for item in findings if item.blocking)
+        unverified = sum(
+            1
+            for item in findings
+            if not item.verified and item.severity in {"BLOCKER", "HIGH"}
+        )
+        _emit(messages, task_id, f"{blocking} blocking, {unverified} unverified HIGH")
+        stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        record = ReviewRecord(
+            head_sha=head_sha,
+            base_sha=base_sha,
+            round=round_no,
+            blocking_findings=blocking,
+            unverified_high=unverified,
+            timestamp=stamp,
+        )
+        records = [*tf.frontmatter.review_records, record]
+        tf = update_frontmatter(path, review_records=records)
+        if findings:
+            dumped = yaml.safe_dump(
+                [
+                    {
+                        "id": item.id,
+                        "severity": item.severity,
+                        "verified": item.verified,
+                        "blocking": item.blocking,
+                        "problem": item.problem,
+                    }
+                    for item in findings
+                ],
+                sort_keys=False,
+            )
+            tf = append_section(path, f"Review — round {round_no}", dumped)
+        _copy_review_evidence(worktree, review_wt, head_sha, round_no)
+        return record, tf
+    finally:
+        if review_wt is not None:
+            gitops.remove_worktree(repo, review_wt)
+            gitops.delete_local_branch(repo, f"review/{task_id}-r{round_no}")
 
 
 def _copy_review_evidence(
@@ -1338,16 +1367,26 @@ def _ready_report(
     rebase_clean: bool,
     gate: Any,
     messages: list[str],
+    worktree: Path,
 ) -> None:
     readiness = check_ready_to_merge(
         tf, decision, verify_passed, blocking, rebase_clean, gate
     )
     task_id = tf.frontmatter.id
     if readiness.ready:
-        _emit(messages, task_id, "merge gate: open")
+        _emit(messages, task_id, "merge readiness: open")
         _emit(messages, task_id, "V1 does not open a pull request")
+        if State(tf.frontmatter.state) is State.READY_TO_MERGE:
+            journal = f".devflow/tasks/{task_id}.md"
+            gitops.commit_paths(worktree, f"Finalize task {task_id} journal", journal)
         return
-    _emit(messages, task_id, f"merge gate: blocked ({len(readiness.blockers)})")
+    _emit(
+        messages,
+        task_id,
+        f"merge readiness: blocked ({len(readiness.blockers)})",
+    )
+    for blocker in readiness.blockers:
+        _emit(messages, task_id, f"  - {blocker}")
 
 
 def _stop_running_agent(task_id: int, repo: Path) -> None:
