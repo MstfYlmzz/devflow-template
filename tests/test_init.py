@@ -43,6 +43,7 @@ def test_init_creates_expected_files(git_repo: Path) -> None:
     assert not (git_repo / "docs/architecture/.gitkeep").exists()
     gitignore = (git_repo / ".gitignore").read_text(encoding="utf-8")
     assert ".devflow/locks/" in gitignore
+    assert ".devflow/worktrees/" in gitignore
     assert ".venv/" in gitignore
 
 
@@ -67,6 +68,7 @@ def test_init_appends_locks_gitignore(git_repo: Path) -> None:
     text = existing.read_text(encoding="utf-8")
     assert "*.pyc" in text
     assert ".devflow/locks/" in text
+    assert ".devflow/worktrees/" in text
 
 
 def test_init_does_not_copy_language_stages(git_repo: Path) -> None:

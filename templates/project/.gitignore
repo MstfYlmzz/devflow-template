@@ -1,2 +1,5 @@
 .devflow/locks/
+
+# Devflow task/review worktrees (machine-local)
+.devflow/worktrees/
 .venv/

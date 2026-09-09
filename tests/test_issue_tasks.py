@@ -43,6 +43,12 @@ def _seed(repo: Path) -> None:
     (repo / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
     (repo / "docs" / "requirements").mkdir(parents=True)
     (repo / "docs" / "adr").mkdir(parents=True)
+    (repo / ".gitignore").write_text(
+        "# Devflow task/review worktrees (machine-local)\n"
+        ".devflow/worktrees/\n"
+        ".devflow/locks/\n",
+        encoding="utf-8",
+    )
     git("add", "-A", cwd=repo)
     git("commit", "-m", "base", cwd=repo)
     _origin_main(repo)
@@ -181,14 +187,23 @@ def test_main_checkout_stays_clean_after_issue_start(
         },
     )
     monkeypatch.setattr("devflow.agents.run", _ok_agent())
-    before = git("status", "--porcelain", "-uno", cwd=project).stdout
+    assert git("status", "--porcelain", cwd=project).stdout == ""
     start(project, 27, risk_hint=Risk.HIGH)
-    after = git("status", "--porcelain", "-uno", cwd=project).stdout
-    assert after == before
-    assert not task_path(project, 27).exists()
     porcelain = git("status", "--porcelain", cwd=project).stdout
-    assert "tasks/27.md" not in porcelain
-    assert ".devflow/tasks/27.md" not in porcelain.replace("\\", "/")
+    assert porcelain == "", porcelain
+    assert not task_path(project, 27).exists()
+    assert task_worktree(project, 27).is_dir()
+
+
+def test_gitignore_ignores_devflow_worktrees() -> None:
+    root = Path(__file__).resolve().parents[1]
+    text = (root / ".gitignore").read_text(encoding="utf-8")
+    assert ".devflow/worktrees/" in text
+    assert ".devflow/tasks/" not in {
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
 
 
 def test_active_worktree_wins_over_main(project: Path) -> None:
