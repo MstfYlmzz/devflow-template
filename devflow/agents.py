@@ -143,11 +143,48 @@ def _build_command(
     agent: str,
     mode: AgentMode,
     prompt: str,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> list[str] | None:
     argv = _resolve_command(agent)
     if argv is None:
         return None
-    return [*argv, *_mode_flags(agent, mode, prompt)]
+    mode_flags = _mode_flags(agent, mode, prompt)
+    runtime_flags = _runtime_flags(agent, model, effort)
+    if agent == "codex":
+        # Codex runtime flags belong to `exec`, before mode-specific options.
+        return [*argv, mode_flags[0], *runtime_flags, *mode_flags[1:]]
+    return [*argv, *runtime_flags, *mode_flags]
+
+
+def _runtime_flags(agent: str, model: str | None, effort: str | None) -> list[str]:
+    if model is not None and not model.strip():
+        raise ValueError("model must not be empty")
+    if effort is not None and not effort.strip():
+        raise ValueError("effort must not be empty")
+    if agent == "codex":
+        if effort is not None and effort not in {"low", "medium", "high"}:
+            raise ValueError(f"unsupported codex effort: {effort}")
+        flags = ["--model", model] if model is not None else []
+        if effort is not None:
+            flags.extend(["--config", f'model_reasoning_effort="{effort}"'])
+        return flags
+    if agent == "claude":
+        if effort is not None and effort not in {
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
+            raise ValueError(f"unsupported claude effort: {effort}")
+        flags = ["--model", model] if model is not None else []
+        if effort is not None:
+            flags.extend(["--effort", effort])
+        return flags
+    if model is not None or effort is not None:
+        raise ValueError(f"{agent} does not support runtime overrides")
+    return []
 
 
 def terminate_tree(pid: int, grace_seconds: float = 5) -> None:
@@ -276,6 +313,8 @@ def run(
     env: dict[str, str] | None = None,
     on_spawn: Callable[[int], None] | None = None,
     on_activity: Callable[[str], None] | None = None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> AgentResult:
     if agent not in COMMANDS:
         raise ValueError(f"unknown agent: {agent}")
@@ -287,7 +326,7 @@ def run(
     started = time.monotonic()
     env_name = COMMANDS[agent]
     prompt = prompt_file.read_text(encoding="utf-8")
-    argv = _build_command(agent, mode, prompt)
+    argv = _build_command(agent, mode, prompt, model=model, effort=effort)
     if argv is None:
         return AgentResult(
             status=AgentStatus.BLOCKED,
@@ -450,6 +489,8 @@ def run_with_retry(
     max_attempts: int = 3,
     timeout_minutes: float = 20,
     sleep_fn: Callable[[float], None] = time.sleep,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> AgentResult:
     last: AgentResult | None = None
     for attempt in range(max_attempts):
@@ -459,6 +500,8 @@ def run_with_retry(
             worktree,
             mode,
             timeout_minutes=timeout_minutes,
+            model=model,
+            effort=effort,
         )
         if last.status is not AgentStatus.RETRY:
             return last

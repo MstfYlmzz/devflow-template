@@ -383,6 +383,59 @@ def test_codex_edit_command(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "danger-full-access" not in argv
 
 
+def test_codex_command_applies_model_and_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CODEX_CMD", "codex")
+    argv = _build_command(
+        "codex",
+        AgentMode.EDIT,
+        "fix the bug",
+        model="gpt-example",
+        effort="high",
+    )
+    assert argv is not None
+    assert argv[:7] == [
+        "codex",
+        "exec",
+        "--model",
+        "gpt-example",
+        "--config",
+        'model_reasoning_effort="high"',
+        "--approve-for-me",
+    ]
+
+
+def test_claude_command_applies_model_and_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CLAUDE_CMD", "claude")
+    argv = _build_command(
+        "claude",
+        AgentMode.REVIEW,
+        "review this",
+        model="opus",
+        effort="xhigh",
+    )
+    assert argv is not None
+    assert argv[:5] == ["claude", "--model", "opus", "--effort", "xhigh"]
+    assert "-p" in argv
+
+
+def test_unsupported_effort_fails_without_silent_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVFLOW_CODEX_CMD", "codex")
+    with pytest.raises(ValueError, match="unsupported codex effort: xhigh"):
+        _build_command(
+            "codex",
+            AgentMode.EDIT,
+            "fix",
+            model="gpt-example",
+            effort="xhigh",
+        )
+
+
 def test_codex_defined_modes() -> None:
     assert _defined_modes("codex") == (AgentMode.READ_ONLY, AgentMode.EDIT)
     assert AgentMode.REVIEW not in _defined_modes("codex")
